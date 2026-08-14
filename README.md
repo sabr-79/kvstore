@@ -1,4 +1,4 @@
-# Distributed KV Store (Raft, B+tree, Go)
+# Distributed KV Store (Raft, B+ tree, Go)
  
 A distributed, Raft-replicated key-value store built from scratch, with a live cluster-state visualizer, chaos testing, and a hand-built B+tree storage engine.
 
