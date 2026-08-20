@@ -1,79 +1,119 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"net/url"
 	"sync"
 	"testing"
+	"time"
 )
 
-func TestKVStoreRobustRace(t *testing.T) {
-	store := KVstore{}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/put", putHandler(&store))
-	mux.HandleFunc("/get", getHandler(&store))
+var (
+	testLogMu sync.Mutex
+	currentT  *testing.T
+)
 
-	server := httptest.NewServer(mux)
-	defer server.Close()
+func logNodeEvent(format string, args ...any) {
+	testLogMu.Lock()
+	defer testLogMu.Unlock()
+	if currentT != nil {
+		currentT.Logf(format, args...)
+	}
+}
 
-	contestedKey := "highly_contested_key"
+func TestRaftInProcessConsensus_2_9(t *testing.T) {
+	testLogMu.Lock()
+	currentT = t
+	testLogMu.Unlock()
+	defer func() {
+		testLogMu.Lock()
+		currentT = nil
+		testLogMu.Unlock()
+	}()
 
-	validPayloads := make(map[string]bool)
-	var mapMu sync.Mutex
-	var wg sync.WaitGroup
-	concurrencyLimit := 100
+	clusterSize := 3
+	servers := make([]*httptest.Server, clusterSize)
+	nodes := make([]*RaftNode, clusterSize)
+	addresses := make([]string, clusterSize)
 
-	for i := 0; i < concurrencyLimit; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
+	for i := 0; i < clusterSize; i++ {
+		mux := http.NewServeMux()
+		server := httptest.NewServer(mux)
+		servers[i] = server
 
-			uniqueValue := "PAYLOAD_VAL_" + strconv.Itoa(id) + "_"
-			for len(uniqueValue) < 200 {
-				uniqueValue += "A"
+		parsedURL, _ := url.Parse(server.URL)
+		addresses[i] = parsedURL.Host
+	}
+
+	t.Logf("[SETUP] Cluster topology ports allocated: %v", addresses)
+
+	for i := 0; i < clusterSize; i++ {
+		id := addresses[i]
+		var peers []string
+		for j := 0; j < clusterSize; j++ {
+			if i != j {
+				peers = append(peers, addresses[j])
 			}
+		}
 
-			mapMu.Lock()
-			validPayloads[uniqueValue] = true
-			mapMu.Unlock()
+		nodes[i] = newRaftNode(id, peers)
 
-			url := server.URL + "/put?key=" + contestedKey + "&val=" + uniqueValue
-			resp, err := http.Post(url, "application/json", nil)
-			if err != nil {
-				t.Errorf("Concurrent PUT request failed: %v", err)
-				return
-			}
-			resp.Body.Close()
-		}(i)
+		mux := servers[i].Config.Handler.(*http.ServeMux)
+		mux.HandleFunc("/request-vote", requestVoteHandler(nodes[i]))
+		mux.HandleFunc("/append-entry", appendEntriesHandler(nodes[i]))
 	}
 
-	wg.Wait()
+	defer func() {
+		for _, s := range servers {
+			s.Close()
+		}
+	}()
 
-	getURL := server.URL + "/get?key=" + contestedKey
-	resp, err := http.Get(getURL)
-	if err != nil {
-		t.Fatalf("Failed to fetch final key value: %v", err)
-	}
-	defer resp.Body.Close()
+	t.Log("[EXECUTION] Cluster is now live. Monitoring lifecycle state changes...")
 
-	var responseData struct {
-		Value string `json:"value"`
-	}
-	err = json.NewDecoder(resp.Body).Decode(&responseData)
-	if err != nil {
-		t.Fatalf("Failed to parse JSON response body: %v", err)
+	time.Sleep(1500 * time.Millisecond)
+
+	t.Log("[EVALUATION] Harvesting final cluster state invariants...")
+
+	leaderCount := 0
+	followerCount := 0
+	candidateCount := 0
+	var clusterTerm int
+	var splitTerms bool
+
+	for i, node := range nodes {
+		node.mu.Lock()
+		role := node.role
+		term := node.currentTerm
+		node.mu.Unlock()
+
+		if i == 0 {
+			clusterTerm = term
+		} else if term != clusterTerm {
+			splitTerms = true
+		}
+
+		switch role {
+		case Leader:
+			leaderCount++
+		case Follower:
+			followerCount++
+		case Candidate:
+			candidateCount++
+		}
 	}
 
-	finalValue := responseData.Value
-	if finalValue == "" {
-		t.Errorf("Assertion Failed: The final stored value was completely empty")
+	if splitTerms {
+		t.Errorf("SAFETY VIOLATION: Cluster failed to converge on an identical term timeline.")
 	}
-
-	if !validPayloads[finalValue] {
-		t.Errorf("CORRUPTION DETECTED! The stored string was torn or corrupted.\nGot unexpected data string length (%d)", len(finalValue))
-	} else {
-		t.Logf("Success! Lock integrity held. Safe data victory for payload.")
+	if leaderCount == 0 {
+		t.Errorf("LIVENESS CRASH: No leader was elected. Read the trace history above to diagnose why.")
+	}
+	if leaderCount > 1 {
+		t.Errorf("SPLIT BRAIN CORRUPTION: Multiple leaders detected simultaneously! Count: %d", leaderCount)
+	}
+	if leaderCount == 1 && !splitTerms {
+		t.Logf("PASS: Exactly 1 stable Leader established at unified Term %d.", clusterTerm)
 	}
 }
