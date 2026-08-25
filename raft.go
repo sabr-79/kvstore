@@ -37,10 +37,12 @@ type RaftNode struct {
 	matchIndex      map[string]int
 	electionResetCh chan struct{}
 	leaderId        string
+	isDead          bool
 }
 
 func newRaftNode(id string, peers []string) *RaftNode {
 	newNode := RaftNode{role: Follower, currentTerm: 0, votedFor: "", id: id, peers: peers, electionResetCh: make(chan struct{}, 1)}
+	readPersistFile(&newNode)
 	go electionTimer(&newNode)
 	go applyLoop(&newNode)
 	return &newNode
@@ -54,6 +56,10 @@ func electionTimer(node *RaftNode) {
 		case <-time.After(randomDuration):
 			node.mu.Lock()
 			isLeader := node.role
+			if node.isDead {
+				node.mu.Unlock()
+				continue
+			}
 			node.mu.Unlock()
 
 			if isLeader != Leader {
@@ -78,6 +84,10 @@ func runHeartbeats(node *RaftNode, _ AppendEntriesArgs) {
 	defer ticker.Stop()
 	for range ticker.C {
 		node.mu.Lock()
+		if node.isDead {
+			node.mu.Unlock()
+			continue
+		}
 		term := node.currentTerm
 		isLeader := node.role
 		id := node.id
@@ -157,6 +167,7 @@ func becomeCandidate(node *RaftNode) {
 	node.votedFor = node.id
 	node.votesReceived = 1
 	node.role = Candidate
+	persist(node)
 
 	lastIdx := len(node.log)
 	lastTerm := 0
@@ -216,10 +227,12 @@ func requestVote(node *RaftNode, arg RequestVoteArgs) RequestVoteReply {
 		node.role = Follower
 		node.currentTerm = arg.Term
 		node.votedFor = ""
+		persist(node)
 	}
 	if node.votedFor == "" || node.votedFor == arg.CandidateId {
 		voteGranted = true
 		node.votedFor = arg.CandidateId
+		persist(node)
 		select {
 		case node.electionResetCh <- struct{}{}:
 		default:
@@ -270,6 +283,7 @@ func appendEntries(node *RaftNode, arg AppendEntriesArgs) ReplyEntriesArgs {
 			node.votedFor = ""
 			node.currentTerm = arg.Term
 			node.leaderId = arg.LeaderId
+			persist(node)
 
 		} else if arg.Term == node.currentTerm && node.role != Follower {
 			node.role = Follower
@@ -281,12 +295,14 @@ func appendEntries(node *RaftNode, arg AppendEntriesArgs) ReplyEntriesArgs {
 			if matchEntry < len(node.log) {
 				if entry.Term != node.log[matchEntry].Term || node.log[matchEntry].Command != entry.Command {
 					node.log = node.log[:matchEntry]
+					persist(node)
 				}
 
 			}
 
 			if len(node.log) == matchEntry {
 				node.log = append(node.log, entry)
+				persist(node)
 			}
 
 		}

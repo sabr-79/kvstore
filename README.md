@@ -13,7 +13,7 @@ the B+ tree storage engine once the Raft logic is complete.
 - `Get`/`Put`/`Remove`/`Scan` all implemented
 - Concurrency-tested under `go test -race`, including a stress test hammering a single contested key from 100 goroutines to verify no torn/corrupted writes
 - Implemented raft-style elections and tested it in `main_test.go`
-- Implemented log replication
+- Implemented log replication, persistence
 
 ### Up next (Phase 4)
 -  Ensure logs and current state persist on disk
@@ -27,8 +27,8 @@ the B+ tree storage engine once the Raft logic is complete.
 | 1    | Single-node KV store  | Done        |
 | 2    | Raft: leader election | Done        |
 | 3    | Raft: log replication | Done        |
-| 4    | Raft log persistence  | Not started |
-| 5    | B+tree storage engine | Not started |
+| 4    | Raft log persistence  | Done        |
+| 5    | B+ tree storage engine| Not started |
 | 6    | Snapshotting          | Not started |
 | 7    | Live state visualizer | Not started |
 | 8    | Chaos testing         | Not started |
@@ -40,6 +40,7 @@ kv/
 ├── handlers.go        # Inbound network helpers
 ├── main_test.go       # Testing for current phase
 ├── main.go            # Web server entrypoint
+├── persistence.go     # Reading/writing from disk
 ├── raft.go            # RaftNode struct, state changes, election, and heartbeats
 ├── rpc.go             # Outbound network helpers 
 └── storage.go         # KVstore struct, core operations + log application loop

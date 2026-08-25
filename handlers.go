@@ -8,6 +8,10 @@ import (
 
 func requestVoteHandler(node *RaftNode) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if node.isDead {
+			http.Error(w, "definitely not allowed lil bro", http.StatusServiceUnavailable)
+			return
+		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "not allowed bro", http.StatusBadRequest)
 			return
@@ -28,7 +32,12 @@ func requestVoteHandler(node *RaftNode) http.HandlerFunc {
 }
 
 func appendEntriesHandler(node *RaftNode) http.HandlerFunc {
+
 	return func(w http.ResponseWriter, r *http.Request) {
+		if node.isDead {
+			http.Error(w, "definitely not allowed lil bro", http.StatusServiceUnavailable)
+			return
+		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "not allowed bro", http.StatusBadRequest)
 			return
@@ -114,11 +123,11 @@ func putHandler(node *RaftNode) http.HandlerFunc {
 			node.mu.Unlock()
 			return
 		}
-		//put(node.stateMachine, key, val)
 		targetIdx := len(node.log) + 1
 
 		var logEntry = LogEntry{Index: len(node.log) + 1, Term: node.currentTerm, Command: "PUT:" + key + ":" + val}
 		node.log = append(node.log, logEntry)
+		persist(node)
 
 		for node.commitIndex < targetIdx && node.role == Leader {
 			node.mu.Unlock()
@@ -164,6 +173,7 @@ func removeHandler(node *RaftNode) http.HandlerFunc {
 
 		var logEntry = LogEntry{Index: len(node.log) + 1, Term: node.currentTerm, Command: "REMOVE:" + key}
 		node.log = append(node.log, logEntry)
+		persist(node)
 
 		for node.commitIndex < targetIdx && node.role == Leader {
 			node.mu.Unlock()
