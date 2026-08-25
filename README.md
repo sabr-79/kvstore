@@ -35,7 +35,8 @@ the B+ tree storage engine once the Raft logic is complete.
 | 9    | Benchmarking          | Not started |
 
 ## File Structure
-```kv/
+```
+kv/
 ├── handlers.go        # Inbound network helpers
 ├── main_test.go       # Testing for current phase
 ├── main.go            # Web server entrypoint
