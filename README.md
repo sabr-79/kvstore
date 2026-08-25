@@ -34,6 +34,16 @@ the B+ tree storage engine once the Raft logic is complete.
 | 8    | Chaos testing         | Not started |
 | 9    | Benchmarking          | Not started |
 
+## File Structure
+kv/
+├── main.go            # Only contains the web server entrypoint & HTTP router wiring
+├── raft.go            # RaftNode struct, state changes, election, and heartbeats
+├── handlers.go        # Inbound network helpers
+├── rpc.go             # Outbound network helpers 
+├── storage.go         # KVstore struct, core operations + log application loop
+└── main_test.go       # Testing for current phase
+
+
 ## Design notes
 - **Transport:** HTTP+JSON for inter-node RPCs for now, may change later (gRPC) for optimization
 - **Storage engine:** B+ tree from scratch for read optimization (instead of write) and range scans
