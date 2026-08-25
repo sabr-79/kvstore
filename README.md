@@ -15,8 +15,11 @@ the B+ tree storage engine once the Raft logic is complete.
 - Implemented raft-style elections and tested it in `main_test.go`
 - Implemented log replication, persistence
 
-### Up next (Phase 4)
--  Ensure logs and current state persist on disk
+### Up next (Phase 5)
+-  Switch to using a B+ tree over go's map structure
+- Implement Page Allocation/freeing, copy on write
+- Explore caching and other optimization techniques to improve writes and internal fragmentation
+
 
 
 ## Roadmap overview
