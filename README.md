@@ -7,19 +7,18 @@ the B+ tree storage engine once the Raft logic is complete.
 
  
  
-### What's done (Phase 1 — single-node KV store)
+### What's done 
 - In-memory store (`map[string]string`) behind `sync.RWMutex`
 - HTTP+JSON API: `GET /get`, `PUT/POST /put`, `DELETE /remove`, `GET /scan`
 - `Get`/`Put`/`Remove`/`Scan` all implemented
 - Concurrency-tested under `go test -race`, including a stress test hammering a single contested key from 100 goroutines to verify no torn/corrupted writes
 - Implemented raft-style elections and tested it in `main_test.go`
+- Implemented log replication
 
-### Up next (Phase 3 — Raft: log replicatioin)
--  Enable AppendEntries to carry meaningful entries
--  Apply commited entries to the KVStore
--  Redirect follower writes to the current leader
+### Up next (Phase 4)
+-  Ensure logs and current state persist on disk
 
- 
+
 ## Roadmap overview
  
 |Phase | Focus                 | Status      |
@@ -27,7 +26,7 @@ the B+ tree storage engine once the Raft logic is complete.
 | 0    | Go/setup fundamentals | Done        |
 | 1    | Single-node KV store  | Done        |
 | 2    | Raft: leader election | Done        |
-| 3    | Raft: log replication | Not started |
+| 3    | Raft: log replication | Done        |
 | 4    | Raft log persistence  | Not started |
 | 5    | B+tree storage engine | Not started |
 | 6    | Snapshotting          | Not started |
@@ -38,4 +37,3 @@ the B+ tree storage engine once the Raft logic is complete.
 ## Design notes
 - **Transport:** HTTP+JSON for inter-node RPCs for now, may change later (gRPC) for optimization
 - **Storage engine:** B+ tree from scratch for read optimization (instead of write) and range scans
-
