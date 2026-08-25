@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,32 +15,6 @@ import (
 type KVstore struct {
 	mu   sync.RWMutex
 	dict map[string]string
-}
-
-type Role int
-
-const (
-	Leader Role = iota
-	Candidate
-	Follower
-)
-
-type RaftNode struct {
-	mu              sync.Mutex
-	currentTerm     int
-	votedFor        string
-	votesReceived   int
-	log             []int
-	role            Role
-	id              string
-	peers           []string
-	timeout         int
-	stateMachine    *KVstore
-	commitIndex     int
-	lastApplied     int
-	nextIndex       map[string]int
-	matchIndex      map[string]int
-	electionResetCh chan struct{}
 }
 
 type RequestVoteArgs struct {
@@ -55,20 +30,17 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId string
+	Term         int
+	LeaderId     string
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type ReplyEntriesArgs struct {
 	Term    int
 	Success bool
-}
-
-func newRaftNode(id string, peers []string) *RaftNode {
-	newNode := RaftNode{role: Follower, currentTerm: 0, votedFor: "", id: id, peers: peers, electionResetCh: make(chan struct{}, 1)}
-	go electionTimer(&newNode)
-	return &newNode
-
 }
 
 func requestVoteHandler(node *RaftNode) http.HandlerFunc {
@@ -194,10 +166,22 @@ func runHeartbeats(node *RaftNode, _ AppendEntriesArgs) {
 		if isLeader != Leader {
 			return
 		}
-		newArg := AppendEntriesArgs{Term: term, LeaderId: id}
+
 		for _, peer := range node.peers {
-			go func(p string) {
-				reply, err := sendAppendedEntry(p, newArg)
+			node.mu.Lock()
+			nxt := node.nextIndex[peer]
+			prevIdx := nxt - 1
+			var prevTerm int
+			if prevIdx == 0 {
+				prevTerm = 0
+			} else {
+				prevTerm = node.log[prevIdx-1].Term
+			}
+			entriesToSend := node.log[prevIdx:]
+			newArg := AppendEntriesArgs{Term: term, LeaderId: id, PrevLogIndex: prevIdx, PrevLogTerm: prevTerm, Entries: entriesToSend, LeaderCommit: node.commitIndex}
+			node.mu.Unlock()
+			go func(p string, args AppendEntriesArgs) {
+				reply, err := sendAppendedEntry(p, args)
 				if err != nil {
 					return
 				}
@@ -207,12 +191,40 @@ func runHeartbeats(node *RaftNode, _ AppendEntriesArgs) {
 					node.currentTerm = reply.Term
 					node.votedFor = ""
 				}
+				if reply.Success {
+					node.matchIndex[peer] = prevIdx + len(entriesToSend)
+					node.nextIndex[peer] = node.matchIndex[peer] + 1
+
+					for i := node.commitIndex + 1; i <= len(node.log); i++ {
+						var count = 1
+						for _, peer := range node.peers {
+							if node.matchIndex[peer] >= i {
+								count++
+							}
+
+						}
+						if count >= (len(node.peers)+1)/2 {
+							if node.log[i-1].Term == node.currentTerm {
+								node.commitIndex = i
+							}
+						}
+
+					}
+
+				}
+				if !reply.Success {
+					if node.nextIndex[peer] > 1 {
+						node.nextIndex[peer]--
+
+					}
+
+				}
 				select {
 				case node.electionResetCh <- struct{}{}:
 				default:
 				}
 				node.mu.Unlock()
-			}(peer)
+			}(peer, newArg)
 
 		}
 
@@ -227,7 +239,12 @@ func becomeCandidate(node *RaftNode) {
 	node.votesReceived = 1
 	node.role = Candidate
 
-	var args = RequestVoteArgs{Term: node.currentTerm, CandidateId: node.id, LastLogIndex: node.commitIndex, LastLogTerm: node.lastApplied}
+	lastIdx := len(node.log)
+	lastTerm := 0
+	if lastIdx > 0 {
+		lastTerm = node.log[lastIdx-1].Term
+	}
+	var args = RequestVoteArgs{Term: node.currentTerm, CandidateId: node.id, LastLogIndex: lastIdx, LastLogTerm: lastTerm}
 	var replyCh = make(chan RequestVoteReply, len(node.peers))
 	node.mu.Unlock()
 	for _, peer := range node.peers {
@@ -299,6 +316,12 @@ func requestVote(node *RaftNode, arg RequestVoteArgs) RequestVoteReply {
 func becomeLeader(node *RaftNode) {
 	node.mu.Lock()
 	node.role = Leader
+	node.nextIndex = make(map[string]int)
+	node.matchIndex = make(map[string]int)
+	for _, peer := range node.peers {
+		node.nextIndex[peer] = len(node.log) + 1
+		node.matchIndex[peer] = 0
+	}
 	var arg = AppendEntriesArgs{Term: node.currentTerm, LeaderId: node.id}
 	node.mu.Unlock()
 	go runHeartbeats(node, arg)
@@ -316,14 +339,67 @@ func appendEntries(node *RaftNode, arg AppendEntriesArgs) ReplyEntriesArgs {
 		case node.electionResetCh <- struct{}{}:
 		default:
 		}
+		if len(node.log) < arg.PrevLogIndex {
+			return ReplyEntriesArgs{Term: node.currentTerm, Success: false}
+		}
+		if arg.PrevLogIndex > 0 && node.log[arg.PrevLogIndex-1].Term != arg.PrevLogTerm {
+			return ReplyEntriesArgs{Term: node.currentTerm, Success: false}
+		}
+
 		if arg.Term > node.currentTerm {
 			node.role = Follower
 			node.votedFor = ""
 			node.currentTerm = arg.Term
+			node.leaderId = arg.LeaderId
+
+		} else if arg.Term == node.currentTerm && node.role != Follower {
+			node.role = Follower
+			node.leaderId = arg.LeaderId
+		}
+		for _, entry := range arg.Entries {
+			matchEntry := entry.Index - 1
+
+			if matchEntry < len(node.log) {
+				if entry.Term != node.log[matchEntry].Term || node.log[matchEntry].Command != entry.Command {
+					node.log = node.log[:matchEntry]
+				}
+
+			}
+
+			if len(node.log) == matchEntry {
+				node.log = append(node.log, entry)
+			}
+
+		}
+		if arg.LeaderCommit > node.commitIndex {
+			node.commitIndex = min(arg.LeaderCommit, len(node.log))
 		}
 
 	}
 	return ReplyEntriesArgs{Term: node.currentTerm, Success: true}
+}
+func applyLoop(node *RaftNode) {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for range ticker.C {
+		node.mu.Lock()
+		for node.commitIndex > node.lastApplied {
+			node.lastApplied++
+			entry := node.log[node.lastApplied-1]
+			commands := strings.Split(entry.Command, ":")
+			switch commands[0] {
+			case "PUT":
+				put(node.stateMachine, commands[1], commands[2])
+			case "REMOVE":
+				remove(node.stateMachine, commands[1])
+			}
+
+		}
+
+		node.mu.Unlock()
+
+	}
+
 }
 
 func get(store *KVstore, key string) (string, bool) {
@@ -339,38 +415,43 @@ func get(store *KVstore, key string) (string, bool) {
 	return "", ok
 
 }
-func getHandler(store *KVstore) http.HandlerFunc {
+func getHandler(node *RaftNode) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		node.mu.Lock()
+		isLeader := node.role == Leader
+		leaderId := node.leaderId
+		if !isLeader {
+			node.mu.Unlock()
+			http.Redirect(w, r, "http://"+leaderId+r.URL.Path+"?"+r.URL.RawQuery, http.StatusSeeOther)
+			return
+
+		}
 		if r.Method != http.MethodGet {
 			http.Error(w, "not allowed bro", http.StatusMethodNotAllowed)
+			node.mu.Unlock()
 			return
 		}
 		key := r.URL.Query().Get("key")
 
 		if key == "" {
 			http.Error(w, "invalid param", http.StatusBadRequest)
+			node.mu.Unlock()
 			return
 		}
-		val, valid := get(store, key)
+		val, valid := get(node.stateMachine, key)
 
 		if !valid {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]string{"error": "no such key exists"})
+			node.mu.Unlock()
 			return
 		}
 
+		node.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(struct {
-			Message string `json:"message"`
-			Key     string `json:"key"`
-			Value   string `json:"value"`
-		}{
-			Message: "Obtained key",
-			Key:     key,
-			Value:   val,
-		})
+		json.NewEncoder(w).Encode(map[string]string{"message": "Got key", "key": key, "value": val})
 
 	}
 
@@ -383,9 +464,19 @@ func put(store *KVstore, key string, val string) {
 	}
 	store.dict[key] = val
 }
-func putHandler(store *KVstore) http.HandlerFunc {
+func putHandler(node *RaftNode) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		node.mu.Lock()
+		isLeader := node.role == Leader
+		leaderId := node.leaderId
+		if !isLeader {
+			node.mu.Unlock()
+			http.Redirect(w, r, "http://"+leaderId+r.URL.Path+"?"+r.URL.RawQuery, http.StatusSeeOther)
+			return
+
+		}
 		if r.Method != http.MethodPost && r.Method != http.MethodPut {
+			node.mu.Unlock()
 			http.Error(w, "not allowed bro", http.StatusMethodNotAllowed)
 			return
 		}
@@ -394,21 +485,26 @@ func putHandler(store *KVstore) http.HandlerFunc {
 
 		if key == "" || val == "" {
 			http.Error(w, "invalid param", http.StatusBadRequest)
+			node.mu.Unlock()
 			return
 		}
-		put(store, key, val)
+		//put(node.stateMachine, key, val)
+		targetIdx := len(node.log) + 1
+
+		var logEntry = LogEntry{Index: len(node.log) + 1, Term: node.currentTerm, Command: "PUT:" + key + ":" + val}
+		node.log = append(node.log, logEntry)
+
+		for node.commitIndex < targetIdx && node.role == Leader {
+			node.mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			node.mu.Lock()
+		}
+
+		node.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(struct {
-			Message string `json:"message"`
-			Key     string `json:"key"`
-			Value   string `json:"value"`
-		}{
-			Message: "Stored key",
-			Key:     key,
-			Value:   val,
-		})
+		json.NewEncoder(w).Encode(map[string]string{"message": "Stored key", "key": key, "value": val})
 
 	}
 
@@ -430,42 +526,57 @@ func remove(store *KVstore, key string) bool {
 
 }
 
-func removeHandler(store *KVstore) http.HandlerFunc {
+func removeHandler(node *RaftNode) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		node.mu.Lock()
+		isLeader := node.role == Leader
+		leaderId := node.leaderId
+		if !isLeader {
+			node.mu.Unlock()
+			http.Redirect(w, r, "http://"+leaderId+r.URL.Path+"?"+r.URL.RawQuery, http.StatusSeeOther)
+			return
+
+		}
 		if r.Method != http.MethodDelete {
+			node.mu.Unlock()
 			http.Error(w, "not allowed bro", http.StatusMethodNotAllowed)
 			return
 		}
 		key := r.URL.Query().Get("key")
 
 		if key == "" {
+			node.mu.Unlock()
 			http.Error(w, "invalid param", http.StatusBadRequest)
 			return
 		}
-		ok := remove(store, key)
-		if ok {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(struct {
-				Message string `json:"message"`
-				Key     string `json:"key"`
-			}{
-				Message: "Removed key",
-				Key:     key,
-			})
+		//ok := remove(node.stateMachine, key)
 
-		} else {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "no such key exists"})
-			return
+		//if ok {
+		targetIdx := len(node.log) + 1
 
+		var logEntry = LogEntry{Index: len(node.log) + 1, Term: node.currentTerm, Command: "REMOVE:" + key}
+		node.log = append(node.log, logEntry)
+
+		for node.commitIndex < targetIdx && node.role == Leader {
+			node.mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			node.mu.Lock()
 		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"message": "Removed key", "key": key})
+		node.mu.Unlock()
+
+		// w.Header().Set("Content-Type", "application/json")
+		// w.WriteHeader(http.StatusNotFound)
+		//json.NewEncoder(w).Encode(map[string]string{"error": "no such key exists"})
+		//node.mu.Unlock()
 
 	}
 
 }
-func Scan(store *KVstore, startKey string, endKey string) map[string]string {
+
+func scan(store *KVstore, startKey string, endKey string) map[string]string {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	keys := []string{}
@@ -485,9 +596,19 @@ func Scan(store *KVstore, startKey string, endKey string) map[string]string {
 	return res
 
 }
-func scanHandler(store *KVstore) http.HandlerFunc {
+func scanHandler(node *RaftNode) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		node.mu.Lock()
+		isLeader := node.role == Leader
+		leaderId := node.leaderId
+		if !isLeader {
+			node.mu.Unlock()
+			http.Redirect(w, r, "http://"+leaderId+r.URL.Path+"?"+r.URL.RawQuery, http.StatusSeeOther)
+			return
+
+		}
 		if r.Method != http.MethodGet {
+			node.mu.Unlock()
 			http.Error(w, "not allowed bro", http.StatusMethodNotAllowed)
 			return
 		}
@@ -495,10 +616,12 @@ func scanHandler(store *KVstore) http.HandlerFunc {
 		ekey := r.URL.Query().Get("endKey")
 
 		if skey == "" || ekey == "" {
+			node.mu.Unlock()
 			http.Error(w, "invalid param", http.StatusBadRequest)
 			return
 		}
-		res := Scan(store, skey, ekey)
+		res := scan(node.stateMachine, skey, ekey)
+		node.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -520,21 +643,21 @@ func scanHandler(store *KVstore) http.HandlerFunc {
 
 func main() {
 	mux := http.NewServeMux()
-	myStore := KVstore{}
-	put(&myStore, "7", "9")
-	x, _ := get(&myStore, "7")
-	y, _ := get(&myStore, "1")
-	z := remove(&myStore, "9")
-	w := Scan(&myStore, "0", "7")
+	// myStore := KVstore{}
+	// put(&myStore, "7", "9")
+	// x, _ := get(&myStore, "7")
+	// y, _ := get(&myStore, "1")
+	// z := remove(&myStore, "9")
+	w := 7
 	fmt.Println(w)
-	fmt.Println(x)
-	fmt.Println(y)
-	fmt.Println(z)
-	mux.HandleFunc("/get", getHandler(&myStore))
-	mux.HandleFunc("/put", putHandler(&myStore))
-	mux.HandleFunc("/remove", removeHandler(&myStore))
-	mux.HandleFunc("/scan", scanHandler(&myStore))
-	fmt.Println("Server starting on :8080...")
+	// fmt.Println(x)
+	// fmt.Println(y)
+	// fmt.Println(z)
+	// mux.HandleFunc("/get", getHandler(&myStore))
+	// mux.HandleFunc("/put", putHandler(&myStore))
+	// mux.HandleFunc("/remove", removeHandler(&myStore))
+	// mux.HandleFunc("/scan", scanHandler(&myStore))
+	// fmt.Println("Server starting on :8080...")
 	http.ListenAndServe(":8080", mux)
 
 }
