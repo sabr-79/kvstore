@@ -52,3 +52,5 @@ kv/
 ## Design notes
 - **Transport:** HTTP+JSON for inter-node RPCs for now, may change later (gRPC) for optimization
 - **Storage engine:** B+ tree from scratch for read optimization (instead of write) and range scans
+- **Slotted Pages:**  For speedy lookups, looking into prefix compression as an optimization
+- **Big Endian byte encoding:** Although my device uses little endian, big endian provides natural sort order at the virtually non existent cost of a single clock cycle to flip them

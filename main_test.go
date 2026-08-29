@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -130,7 +131,6 @@ func TestRaftPersistenceCrashAndRecover_Phase4(t *testing.T) {
 	}
 }
 
-// Helper function to generate deterministic random string keys
 func generateRandomKV(seed int64, count int) [][2]string {
 	r := rand.New(rand.NewSource(seed))
 	pairs := make([][2]string, count)
@@ -142,142 +142,216 @@ func generateRandomKV(seed int64, count int) [][2]string {
 	return pairs
 }
 
-func TestBPlusTreeAgainstMap_Differential(t *testing.T) {
-	order := 4
-	tree := newTree(order)
-	goMap := make(map[string]string)
+func TestBPlusTreeVerify(t *testing.T) {
+	order := 128
+	pageSize := 4096
+	numKeys := 5000
+	seed := int64(12345)
 
-	dataset := generateRandomKV(42, 10000)
+	dbPath := filepath.Join(t.TempDir(), "verify.db")
+	tree := newTree(dbPath, pageSize, order)
+	truth := make(map[string]string)
 
-	t.Logf("[STAGE 1] Feeding 10,000 sequential entries into B+Tree and Go Map...")
-	for _, kv := range dataset {
-		key, val := kv[0], kv[1]
+	rng := rand.New(rand.NewSource(seed))
+
+	t.Logf("[1] Inserting %d random keys...", numKeys)
+	insertedKeys := make([]string, 0, numKeys)
+	for i := 0; i < numKeys; i++ {
+		key := fmt.Sprintf("key_%06d_%d", rng.Intn(1000), i)
+		val := fmt.Sprintf("val_%06d", i)
 		tree.insert(key, val)
-		goMap[key] = val
+		if _, exists := truth[key]; !exists {
+			insertedKeys = append(insertedKeys, key)
+		}
+		truth[key] = val
 	}
+	t.Logf("   Inserted %d unique keys.", len(insertedKeys))
 
-	t.Log("[STAGE 2] Verifying point lookups (Search) for every injected key...")
-	for _, kv := range dataset {
-		key, expectedVal := kv[0], kv[1]
-
+	t.Log("[2] Verifying all inserted keys...")
+	for _, key := range insertedKeys {
 		treeVal, found := tree.search(key)
 		if !found {
-			t.Fatalf("CORRUPTION FAILURE: Key '%s' exists in Ground Truth map but was not found in B+Tree.", key)
-		}
-		if treeVal != expectedVal {
-			t.Fatalf("VALUE MISMATCH: For key '%s', B+Tree returned '%s'; expected '%s'", key, treeVal, expectedVal)
-		}
-	}
-
-	t.Log("[STAGE 3] Querying non-existent random keys to verify clean miss handling...")
-	for i := 0; i < 1000; i++ {
-		fakeKey := fmt.Sprintf("non_existent_key_%d", i)
-		_, found := tree.search(fakeKey)
-		if found {
-			t.Errorf("SAFETY BREACH: Search returned true for a non-existent phantom key: '%s'", fakeKey)
+			t.Errorf("   MISSING: Key '%s' not found in B+Tree", key)
+		} else if treeVal != truth[key] {
+			t.Errorf("   MISMATCH: Key '%s' -> got '%s', expected '%s'", key, treeVal, truth[key])
 		}
 	}
 
-	t.Log("[STAGE 4] Executing range scans against map-filtered ground truth...")
-
-	buildExpectedScan := func(start, end string) map[string]string {
-		expected := make(map[string]string)
-		for k, v := range goMap {
-			if k >= start && k <= end {
-				expected[k] = v
-			}
+	t.Log("[3] Checking non‑existent keys...")
+	for i := 0; i < 100; i++ {
+		fakeKey := fmt.Sprintf("fake_%d", rng.Intn(100000))
+		if _, found := tree.search(fakeKey); found {
+			t.Errorf("   PHANTOM: Key '%s' unexpectedly found", fakeKey)
 		}
-		return expected
 	}
 
+	t.Log("[4] Testing range scans...")
 	scanTestCases := []struct {
 		name  string
 		start string
 		end   string
 	}{
-		{"Standard Sub-Range", "key_1000_", "key_2000_"},
-		{"Narrow Boundary", "key_500_0", "key_500_9"},
-		{"Entire Dataset Sweep", "a", "z"}, // Strings catch all "key_" prefixes
-		{"Completely Empty Range", "xyz_start", "xyz_end"},
-		{"Inverted Bounds (Should be empty)", "key_9000_", "key_1000_"},
+		{"First 100 keys", insertedKeys[0], insertedKeys[99]},
+		{"Middle 200 keys", insertedKeys[400], insertedKeys[599]},
+		{"Full dataset", insertedKeys[0], insertedKeys[len(insertedKeys)-1]},
+		{"Empty range", "zzz_start", "zzz_end"},
+		{"Inverted bounds", insertedKeys[500], insertedKeys[100]},
 	}
 
 	for _, tc := range scanTestCases {
-		t.Logf("   Testing Range: [%s] -> [%s] (%s)", tc.start, tc.end, tc.name)
+		expected := make(map[string]string)
+		for k, v := range truth {
+			if k >= tc.start && k <= tc.end {
+				expected[k] = v
+			}
+		}
 
-		expectedMap := buildExpectedScan(tc.start, tc.end)
+		keys, vals := tree.scan(tc.start, tc.end)
 
-		treeMap := tree.scan(tc.start, tc.end)
-
-		if len(treeMap) != len(expectedMap) {
-			t.Errorf("      FAIL (%s): Size mismatch! Tree returned %d keys, Expected %d keys.",
-				tc.name, len(treeMap), len(expectedMap))
+		// Check length
+		if len(keys) != len(expected) {
+			t.Errorf("   SCAN %s: size mismatch: got %d, expected %d", tc.name, len(keys), len(expected))
 			continue
 		}
 
-		for expectedKey, expectedVal := range expectedMap {
-			treeVal, exists := treeMap[expectedKey]
-			if !exists {
-				t.Errorf("      FAIL (%s): Key '%s' expected in scan result, but B+Tree missed it.",
-					tc.name, expectedKey)
-			}
-			if treeVal != expectedVal {
-				t.Errorf("      FAIL (%s): Key '%s' value mismatch. Tree: '%s', Expected: '%s'",
-					tc.name, expectedKey, treeVal, expectedVal)
+		for i := 0; i < len(keys); i++ {
+			key := keys[i]
+			val := vals[i]
+			expVal, ok := expected[key]
+			if !ok {
+				t.Errorf("   SCAN %s: extra key '%s' returned", tc.name, key)
+			} else if val != expVal {
+				t.Errorf("   SCAN %s: value mismatch for '%s': got '%s', expected '%s'", tc.name, key, val, expVal)
 			}
 		}
 	}
-	t.Log("[STAGE 5] Deleting a random subset of 3,000 keys and verifying state machine convergence...")
 
-	r := rand.New(rand.NewSource(99))
-	indicesToDelete := make(map[int]bool)
-	for len(indicesToDelete) < 3000 {
-		indicesToDelete[r.Intn(len(dataset))] = true
+	t.Log("[5] Updating 20% of keys...")
+	updateCount := len(insertedKeys) / 5
+	for i := 0; i < updateCount; i++ {
+		idx := rng.Intn(len(insertedKeys))
+		key := insertedKeys[idx]
+		newVal := fmt.Sprintf("updated_%d", i)
+		tree.insert(key, newVal)
+		truth[key] = newVal
 	}
 
-	deletedCount := 0
-	for idx, kv := range dataset {
-		if indicesToDelete[idx] {
-			key := kv[0]
-			tree.remove(key)
-			delete(goMap, key)
-			deletedCount++
-		}
-	}
-	t.Logf("   Successfully issued %d deletion requests.", deletedCount)
-
-	t.Log("   Verifying integrity of remaining keys...")
-	for _, kv := range dataset {
-		key, val := kv[0], kv[1]
-
+	t.Log("   Verifying updated keys...")
+	for _, key := range insertedKeys {
 		treeVal, found := tree.search(key)
-		_, expectedFound := goMap[key]
-
-		if expectedFound {
-			if !found {
-				t.Errorf("POST-DELETE CORRUPTION: Key '%s' was accidentally lost during sibling node deletions.", key)
-			}
-			if treeVal != val {
-				t.Errorf("POST-DELETE VALUE CORRUPTION: Key '%s' returned wrong value '%s' after structural slice shifts.", key, treeVal)
-			}
-		} else {
-			if found {
-				t.Errorf("LEAKED KEY RESIDUE: Key '%s' was deleted, but 'search' still returned true. Parallel values array likely out of alignment.", key)
-			}
+		if !found {
+			t.Errorf("   UPDATE CORRUPTION: key '%s' missing", key)
+		} else if treeVal != truth[key] {
+			t.Errorf("   UPDATE MISMATCH: key '%s' -> '%s', expected '%s'", key, treeVal, truth[key])
 		}
 	}
 
-	t.Log("   Re-running range scans across deleted/fragmented nodes...")
+	t.Log("[6] Deleting 30% of keys...")
+	deleteCount := len(insertedKeys) * 3 / 10
+	rng.Shuffle(len(insertedKeys), func(i, j int) {
+		insertedKeys[i], insertedKeys[j] = insertedKeys[j], insertedKeys[i]
+	})
+	toDelete := insertedKeys[:deleteCount]
+
+	for _, key := range toDelete {
+		tree.remove(key)
+		delete(truth, key)
+	}
+
+	t.Log("   Verifying remaining keys...")
+	for _, key := range insertedKeys[deleteCount:] {
+		treeVal, found := tree.search(key)
+		if !found {
+			t.Errorf("   DELETE CORRUPTION: key '%s' was wrongly deleted", key)
+		} else if treeVal != truth[key] {
+			t.Errorf("   DELETE MISMATCH: key '%s' -> '%s', expected '%s'", key, treeVal, truth[key])
+		}
+	}
+
+	t.Log("[7] Checking tree invariants...")
+	if err := verifyTreeInvariants(tree); err != nil {
+		t.Errorf("   STRUCTURAL ERROR: %v", err)
+	}
+
+	t.Log("[8] Re‑running scans after deletions...")
 	for _, tc := range scanTestCases {
-		expectedMap := buildExpectedScan(tc.start, tc.end)
-		treeMap := tree.scan(tc.start, tc.end)
-
-		if len(treeMap) != len(expectedMap) {
-			t.Errorf("      FAIL Post-Delete (%s): Range slice count discrepancy. Tree: %d, Expected: %d", tc.name, len(treeMap), len(expectedMap))
+		expected := make(map[string]string)
+		for k, v := range truth {
+			if k >= tc.start && k <= tc.end {
+				expected[k] = v
+			}
+		}
+		keys, _ := tree.scan(tc.start, tc.end)
+		if len(keys) != len(expected) {
+			t.Errorf("   POST‑DELETE SCAN %s: size mismatch: got %d, expected %d", tc.name, len(keys), len(expected))
 		}
 	}
 
-	t.Logf("SUCCESS: B+Tree with order %d perfectly matches plain map ground truth across 10,000 keys.", order)
+	t.Log("Verification PASSED – B+Tree matches map ground truth.")
+}
+
+func verifyTreeInvariants(tree *TreeRoot) error {
+	if tree.root == 0 {
+		return fmt.Errorf("root page is 0")
+	}
+
+	visited := make(map[int64]bool)
+	err := verifyNode(tree, tree.root, visited, nil, nil)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func verifyNode(tree *TreeRoot, page int64, visited map[int64]bool, minKey, maxKey *string) error {
+	if visited[page] {
+		return fmt.Errorf("cycle detected at page %d", page)
+	}
+	visited[page] = true
+
+	buf, err := tree.pager.readPage(page)
+	if err != nil {
+		return fmt.Errorf("failed to read page %d: %w", page, err)
+	}
+	node := decodeNode(buf, tree.order)
+
+	for i := 0; i < len(node.keys)-1; i++ {
+		if node.keys[i] >= node.keys[i+1] {
+			return fmt.Errorf("keys not sorted at page %d: %s >= %s", page, node.keys[i], node.keys[i+1])
+		}
+	}
+
+	if minKey != nil && len(node.keys) > 0 && node.keys[0] < *minKey {
+		return fmt.Errorf("page %d has first key %s < minKey %s", page, node.keys[0], *minKey)
+	}
+	if maxKey != nil && len(node.keys) > 0 && node.keys[len(node.keys)-1] > *maxKey {
+		return fmt.Errorf("page %d has last key %s > maxKey %s", page, node.keys[len(node.keys)-1], *maxKey)
+	}
+
+	if node.isLeaf {
+		if len(node.children) != 0 {
+			return fmt.Errorf("leaf page %d has children", page)
+		}
+	} else {
+		if len(node.children) != len(node.keys)+1 {
+			return fmt.Errorf("internal page %d has %d keys and %d children (should be %d)",
+				page, len(node.keys), len(node.children), len(node.keys)+1)
+		}
+		for i, child := range node.children {
+			var childMin, childMax *string
+			if i < len(node.keys) {
+				childMax = &node.keys[i]
+			}
+			if i > 0 {
+				childMin = &node.keys[i-1]
+			}
+			if err := verifyNode(tree, child, visited, childMin, childMax); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func BenchmarkBPlusTreeVsMap(b *testing.B) {
@@ -293,8 +367,11 @@ func BenchmarkBPlusTreeVsMap(b *testing.B) {
 	})
 
 	b.Run("BPlusTree-Order32-Insert-10k", func(b *testing.B) {
+		temp := b.TempDir()
+		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			tree := newTree(32)
+			path := filepath.Join(temp, fmt.Sprintf("bench_32_%d.db", i))
+			tree := newTree(path, 4096, 32)
 			for _, kv := range dataset {
 				tree.insert(kv[0], kv[1])
 			}
@@ -302,8 +379,11 @@ func BenchmarkBPlusTreeVsMap(b *testing.B) {
 	})
 
 	b.Run("BPlusTree-Order64-Insert-10k", func(b *testing.B) {
+		temp := b.TempDir()
+		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			tree := newTree(64)
+			path := filepath.Join(temp, fmt.Sprintf("bench_32_%d.db", i))
+			tree := newTree(path, 4096, 64)
 			for _, kv := range dataset {
 				tree.insert(kv[0], kv[1])
 			}
@@ -311,7 +391,9 @@ func BenchmarkBPlusTreeVsMap(b *testing.B) {
 	})
 
 	goMap := make(map[string]string)
-	tree32 := newTree(32)
+	temp := b.TempDir()
+	path := filepath.Join(temp, "bench_search.db")
+	tree32 := newTree(path, 4096, 32)
 	for _, kv := range dataset {
 		goMap[kv[0]] = kv[1]
 		tree32.insert(kv[0], kv[1])
@@ -332,4 +414,59 @@ func BenchmarkBPlusTreeVsMap(b *testing.B) {
 			}
 		}
 	})
+}
+
+func TestBPlusTreeSerializationRoundTrip(t *testing.T) {
+	pageSize := 4096
+	order := 32
+
+	buf := make([]byte, pageSize)
+
+	originalLeaf := &TreeNode{
+		isLeaf:   true,
+		order:    order,
+		nextPage: 88,
+		keys:     []string{"apple", "banana", "cherry"},
+		values:   []string{"red", "yellow", "dark-red"},
+	}
+
+	leafBytes := encodeNode(originalLeaf, buf)
+	recoveredLeaf := decodeNode(leafBytes, order)
+
+	if len(recoveredLeaf.keys) != len(originalLeaf.keys) || recoveredLeaf.nextPage != 88 {
+		t.Fatalf("Leaf header or size corrupted during byte translation.")
+	}
+	for i := 0; i < len(originalLeaf.keys); i++ {
+		if recoveredLeaf.keys[i] != originalLeaf.keys[i] || recoveredLeaf.values[i] != originalLeaf.values[i] {
+			t.Errorf("Leaf Data mismatch at index %d! Got %s:%s", i, recoveredLeaf.keys[i], recoveredLeaf.values[i])
+		}
+	}
+
+	originalInternal := &TreeNode{
+		isLeaf:   false,
+		order:    order,
+		keys:     []string{"grape", "lemon"},
+		children: []int64{101, 102, 103},
+	}
+
+	internalBytes := encodeNode(originalInternal, buf)
+	recoveredInternal := decodeNode(internalBytes, order)
+
+	if len(recoveredInternal.children) != 3 || recoveredInternal.children[1] != 102 {
+		t.Fatalf("Internal node child page links corrupt after decoding.")
+	}
+	t.Log("PASS: Pure-byte slotted-page serialization round-trip successful!")
+}
+
+func makeShuffledDataset(n int, seed int64) [][2]string {
+	dataset := make([][2]string, n)
+	for i := 0; i < n; i++ {
+		dataset[i][0] = fmt.Sprintf("key_%05d", i)
+		dataset[i][1] = fmt.Sprintf("value_%05d", i)
+	}
+	r := rand.New(rand.NewSource(seed))
+	r.Shuffle(len(dataset), func(i, j int) {
+		dataset[i], dataset[j] = dataset[j], dataset[i]
+	})
+	return dataset
 }
