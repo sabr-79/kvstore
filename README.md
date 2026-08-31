@@ -59,23 +59,14 @@ kv/
 - The B+ Tree beat SQLite on all metrics at 1M keys save for writes and cold reads
 - Instead of splitting by only key count, we can split by byte count as well to improve storage and overall speed.
 
-Before split opt, 1M keys:
+| Metric                | Before              | After              | %           |
+|-----------------------|---------------------|--------------------|-------------|
+| On‑disk footprint     | 90,864 KB           | 45,700 KB          | **−50%**    |
+| Warm point reads      | 268,557 QPS         | 297,560 QPS        | **+10.8%**  |
+| Sequential reads      | 3,631,085 QPS       | 3,864,475 QPS      | **+6.4%**   |
+| Range scans           | 46,418 QPS          | 57,133 QPS         | **+23%**    |
+| Durable writes        | 29,686 QPS          | 44,674 QPS         | **+50%**    |
 
-B+Tree cache: 10644 KB | actual data: 90864 KB
-B+Tree warm reads      | 1000000 ops |    268557 qps | p50=3.833µs | p95=7.667µs | p99=12.833µs | errs=0
-B+Tree seq reads       | 1000000 ops |   3631085 qps | p50=  167ns | p95=  209ns | p99=3.208µs | errs=0
-B+Tree cold reads      | 1000000 ops |     85557 qps | p50=10.125µs | p95=15.958µs | p99=23.625µs | errs=0
-B+Tree range scans     |     100 ops |     46418 qps | p50=17.583µs | p95=36.583µs | p99=111.125µs | errs=0
-(write QPS: 29686)
-
-After split opt, 1M keys:
-
-B+Tree cache: 10644 KB | actual data: 45700 KB
-B+Tree warm reads      | 1000000 ops |    297560 qps | p50=3.667µs | p95=7.583µs | p99=10.875µs | errs=0
-B+Tree seq reads       | 1000000 ops |   3864475 qps | p50=  167ns | p95=  209ns | p99=1.792µs | errs=0
-B+Tree cold reads      | 1000000 ops |     87741 qps | p50=9.875µs | p95=15.25µs | p99=20.625µs | errs=0
-B+Tree range scans     |     100 ops |     57133 qps | p50=15.417µs | p95=25.709µs | p99=37.459µs | errs=0
-(write QPS: 44674)
 
 ## Benchmark Comparison (1M keys, equal memory budget)
 
