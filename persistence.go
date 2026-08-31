@@ -1,10 +1,12 @@
 package main
 
 import (
+	"container/list"
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
 	"os"
+	"sync"
 )
 
 type RaftSnapshot struct {
@@ -17,6 +19,46 @@ type Metadata struct {
 	rootpage int64
 	maxpage  int64
 	freelist []int64
+}
+
+type Pager struct {
+	file      *os.File
+	pagesize  int
+	order     int
+	mu        sync.Mutex
+	cache     map[int64]*list.Element
+	lru       *list.List
+	maxBytes  int64
+	usedBytes int64
+	// reduce GC pressure
+	encodePool *sync.Pool
+}
+
+type pageEntry struct {
+	node  *TreeNode
+	dirty bool
+	page  int64
+}
+
+func newPager(filepath string, pagesize, order int, maxBytes int64) *Pager {
+	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_RDWR, 0666)
+	if err != nil {
+		return nil
+	}
+	return &Pager{
+		file:      file,
+		pagesize:  pagesize,
+		order:     order,
+		cache:     make(map[int64]*list.Element),
+		lru:       list.New(),
+		maxBytes:  maxBytes,
+		usedBytes: 0,
+		encodePool: &sync.Pool{
+			New: func() interface{} {
+				return make([]byte, pagesize)
+			},
+		},
+	}
 }
 
 func persist(node *RaftNode) {
@@ -189,10 +231,197 @@ func decodeMeta(buf []byte) *Metadata {
 	return meta
 }
 
+func (t *TreeRoot) allocatePage() int64 {
+	var assignedpage int64
+	if len(t.freelist) > 0 {
+		assignedpage = t.freelist[len(t.freelist)-1]
+		t.freelist = t.freelist[:len(t.freelist)-1]
+	} else {
+		t.maxpage++
+		assignedpage = t.maxpage
+	}
+	return assignedpage
+}
+func (t *TreeRoot) commitMetadata() {
+	meta := &Metadata{
+		rootpage: t.root,
+		maxpage:  t.maxpage,
+		freelist: t.freelist,
+	}
+	t.pager.writePage(0, encodeMeta(meta, t.pager.pagesize))
+}
+
+func (p *Pager) readPage(pageNum int64) ([]byte, error) {
+	buf := make([]byte, p.pagesize)
+	offset := pageNum * int64(p.pagesize)
+	_, err := p.file.ReadAt(buf, offset)
+	if err != nil {
+		return nil, fmt.Errorf("readPage %d: %w", pageNum, err)
+	}
+	return buf, nil
+}
+
+func (p *Pager) writePage(pageNum int64, data []byte) {
+	offset := pageNum * int64(p.pagesize)
+	if _, err := p.file.WriteAt(data, offset); err != nil {
+		panic(fmt.Errorf("writePage %d: %w", pageNum, err))
+	}
+}
+
+func (p *Pager) flush() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, elem := range p.cache {
+		entry := elem.Value.(*pageEntry)
+		if entry.dirty {
+			p.flushNode(entry)
+		}
+	}
+	return p.syncFile()
+}
+
+func (p *Pager) close() error {
+	if err := p.flush(); err != nil {
+		return err
+	}
+	return p.file.Close()
+}
+
+func (n *TreeNode) estimatedSize() int64 {
+	size := int64(64)
+	for _, k := range n.keys {
+		size += int64(len(k)) + 16
+	}
+	for _, v := range n.values {
+		size += int64(len(v)) + 16
+	}
+	size += int64(len(n.children) * 8)
+	return size
+}
+
+func (p *Pager) evictToFit(needed int64) {
+	for p.usedBytes+needed > p.maxBytes && p.lru.Len() > 0 {
+		e := p.lru.Back()
+		entry := e.Value.(*pageEntry)
+		if entry.dirty {
+			p.flushNode(entry)
+		}
+		delete(p.cache, entry.page)
+		p.lru.Remove(e)
+		p.usedBytes -= entry.node.estimatedSize()
+	}
+}
+
+func (p *Pager) flushNode(entry *pageEntry) {
+	buf := p.getEncodeBuffer()
+	encodeNode(entry.node, buf)
+	offset := entry.page * int64(p.pagesize)
+	if _, err := p.file.WriteAt(buf, offset); err != nil {
+		panic(err)
+	}
+	p.putEncodeBuffer(buf)
+	entry.dirty = false
+}
+func (p *Pager) loadNode(pageNum int64) *TreeNode {
+	p.mu.Lock()
+	if elem, ok := p.cache[pageNum]; ok {
+		p.lru.MoveToFront(elem)
+		entry := elem.Value.(*pageEntry)
+		p.mu.Unlock()
+		return entry.node
+	}
+	p.mu.Unlock()
+
+	buf := make([]byte, p.pagesize)
+	offset := pageNum * int64(p.pagesize)
+	_, err := p.file.ReadAt(buf, offset)
+	if err != nil {
+		panic(fmt.Errorf("read page %d: %w", pageNum, err))
+	}
+	node := decodeNode(buf, p.order)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if elem, ok := p.cache[pageNum]; ok {
+		p.lru.MoveToFront(elem)
+		return elem.Value.(*pageEntry).node
+	}
+
+	nodeSize := node.estimatedSize()
+	p.evictToFit(nodeSize)
+
+	entry := &pageEntry{node: node, dirty: false, page: pageNum}
+	elem := p.lru.PushFront(entry)
+	p.cache[pageNum] = elem
+	p.usedBytes += nodeSize
+	return node
+}
+
+func (p *Pager) writeNode(pageNum int64, node *TreeNode) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if elem, ok := p.cache[pageNum]; ok {
+		entry := elem.Value.(*pageEntry)
+		oldSize := entry.node.estimatedSize()
+		newSize := node.estimatedSize()
+		p.usedBytes += newSize - oldSize
+		entry.node = node
+		entry.dirty = true
+		p.lru.MoveToFront(elem)
+
+		if p.usedBytes > p.maxBytes {
+			for p.usedBytes > p.maxBytes && p.lru.Len() > 1 {
+				back := p.lru.Back()
+				if back == elem {
+					p.lru.MoveToFront(elem)
+					continue
+				}
+
+				entryBack := back.Value.(*pageEntry)
+				if entryBack.dirty {
+					p.flushNode(entryBack)
+				}
+				delete(p.cache, entryBack.page)
+				p.lru.Remove(back)
+				p.usedBytes -= entryBack.node.estimatedSize()
+			}
+		}
+		return
+	}
+
+	nodeSize := node.estimatedSize()
+	p.evictToFit(nodeSize)
+	entry := &pageEntry{node: node, dirty: true, page: pageNum}
+	elem := p.lru.PushFront(entry)
+	p.cache[pageNum] = elem
+	p.usedBytes += nodeSize
+}
+
 func (p *Pager) getEncodeBuffer() []byte {
 	return p.encodePool.Get().([]byte)
 }
 
 func (p *Pager) putEncodeBuffer(buf []byte) {
 	p.encodePool.Put(buf)
+}
+
+func nodeEncodedSize(n *TreeNode) int {
+	size := 11
+	if n.isLeaf {
+		size += len(n.keys) * 2
+		for i := 0; i < len(n.keys); i++ {
+			size += 2 + len(n.keys[i])
+			size += 2 + len(n.values[i])
+		}
+	} else {
+		size += len(n.children) * 8
+		size += len(n.keys) * 2
+		for i := 0; i < len(n.keys); i++ {
+			size += 2 + len(n.keys[i])
+		}
+	}
+	return size
 }

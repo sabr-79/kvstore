@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestRaftPersistenceCrashAndRecover_Phase4(t *testing.T) {
+func TestRaftPersistenceCrashAndRecover(t *testing.T) {
 	clusterSize := 3
 	servers := make([]*httptest.Server, clusterSize)
 	nodes := make([]*RaftNode, clusterSize)
@@ -145,7 +145,7 @@ func generateRandomKV(seed int64, count int) [][2]string {
 func TestBPlusTreeVerify(t *testing.T) {
 	order := 128
 	pageSize := 4096
-	numKeys := 5000
+	numKeys := 1000000
 	seed := int64(12345)
 
 	dbPath := filepath.Join(t.TempDir(), "verify.db")
@@ -208,7 +208,6 @@ func TestBPlusTreeVerify(t *testing.T) {
 
 		keys, vals := tree.scan(tc.start, tc.end)
 
-		// Check length
 		if len(keys) != len(expected) {
 			t.Errorf("   SCAN %s: size mismatch: got %d, expected %d", tc.name, len(keys), len(expected))
 			continue

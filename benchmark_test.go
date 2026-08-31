@@ -51,6 +51,22 @@ func cacheBudgetBytes(actualBytesUsed int64) int64 {
 	return budget
 }
 
+func (p *Pager) SetCacheBudget(maxBytes int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.maxBytes = maxBytes
+	for p.usedBytes > p.maxBytes && p.lru.Len() > 0 {
+		e := p.lru.Back()
+		entry := e.Value.(*pageEntry)
+		if entry.dirty {
+			p.flushNode(entry)
+		}
+		delete(p.cache, entry.page)
+		p.lru.Remove(e)
+		p.usedBytes -= entry.node.estimatedSize()
+	}
+}
+
 func safeIntn(rng *rand.Rand, n int) int {
 	if n <= 0 {
 		return 0
@@ -80,15 +96,22 @@ func TestFullBenchmark(t *testing.T) {
 				return sortedDataset[i][0] < sortedDataset[j][0]
 			})
 
-			runBPlusTreeFull(t, n, dataset, sortedDataset)
-			runSQLiteFull(t, n, dataset, sortedDataset)
-			runPebbleFull(t, n, dataset, sortedDataset)
+			// After generating the dataset, but before running any system:
+			totalPayload := int64(0)
+			for _, kv := range dataset {
+				totalPayload += int64(len(kv[0]) + len(kv[1]))
+			}
+			cacheBytes := cacheBudgetBytes(totalPayload) // uses your existing minCacheBytes and fraction
+
+			runBPlusTreeFull(t, n, dataset, sortedDataset, cacheBytes)
+			runSQLiteFull(t, n, dataset, sortedDataset, cacheBytes)
+			runPebbleFull(t, n, dataset, sortedDataset, cacheBytes)
 		})
 	}
 }
 
 // B+TREE
-func runBPlusTreeFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
+func runBPlusTreeFull(t *testing.T, n int, dataset, sortedDataset [][2]string, cacheBytes int64) {
 	dbPath := filepath.Join(t.TempDir(), "btree.db")
 	tree := newTree(dbPath, pageSize, order)
 	tree.batchsize = batchSize
@@ -102,14 +125,8 @@ func runBPlusTreeFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
 	qpsWrite := float64(n) / writeDur.Seconds()
 
 	actualBytes := tree.maxpage * int64(pageSize)
-	cacheBytes := cacheBudgetBytes(actualBytes)
-	cachePages := int(cacheBytes / int64(pageSize))
-	if cachePages < 1 {
-		cachePages = 1
-	}
-	tree.pager.maxClean = cachePages
-	fmt.Printf("  B+Tree cache: %d pages (%d KB) | actual data: %d KB\n",
-		cachePages, cacheBytes>>10, actualBytes>>10)
+	tree.pager.SetCacheBudget(cacheBytes)
+	fmt.Printf("  B+Tree cache: %d KB | actual data: %d KB\n", cacheBytes>>10, actualBytes>>10)
 
 	// Warm random reads
 	latWarm := make([]time.Duration, n)
@@ -146,7 +163,6 @@ func runBPlusTreeFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
 	// Cold random reads
 	tree.pager.close()
 	tree = newTree(dbPath, pageSize, order)
-	tree.pager.maxClean = cachePages
 
 	latCold := make([]time.Duration, n)
 	startCold := time.Now()
@@ -188,7 +204,7 @@ func runBPlusTreeFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
 }
 
 // SQLITE
-func runSQLiteFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
+func runSQLiteFull(t *testing.T, n int, dataset, sortedDataset [][2]string, cacheBytes int64) {
 	dbPath := filepath.Join(t.TempDir(), "sqlite.db")
 
 	db, err := sql.Open("sqlite", dbPath+"?cache=shared&mode=rwc")
@@ -218,7 +234,6 @@ func runSQLiteFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
 	var pageCount int
 	db.QueryRow("PRAGMA page_count").Scan(&pageCount)
 	actualBytes := int64(pageCount) * 4096
-	cacheBytes := cacheBudgetBytes(actualBytes)
 	cachePages := int(cacheBytes / 4096)
 	if cachePages < 1 {
 		cachePages = 1
@@ -326,7 +341,7 @@ func runSQLiteFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
 }
 
 // PEBBLE
-func runPebbleFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
+func runPebbleFull(t *testing.T, n int, dataset, sortedDataset [][2]string, cacheBytes int64) {
 	dbPath := filepath.Join(t.TempDir(), "pebble")
 	optsWrite := &pebble.Options{
 		Cache:                       pebble.NewCache(0),
@@ -371,7 +386,6 @@ func runPebbleFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
 	if err != nil {
 		t.Fatalf("Failed to walk Pebble dir: %v", err)
 	}
-	cacheBytes := cacheBudgetBytes(actualBytes)
 	fmt.Printf("  Pebble cache: %d KB | actual data: %d KB\n", cacheBytes>>10, actualBytes>>10)
 
 	optsRead := &pebble.Options{
@@ -482,218 +496,6 @@ func runPebbleFull(t *testing.T, n int, dataset, sortedDataset [][2]string) {
 		scanDur := time.Since(startScan)
 		p50s, p95s, p99s := calcPercentiles(latScan)
 		printResult("Pebble range scans", scanCount, scanDur, p50s, p95s, p99s, errScan)
-	}
-
-	fmt.Printf("  (write QPS: %.0f)\n", qpsWrite)
-}
-
-// Sequential & Range Scan Benchmark (against Pebble only)
-func TestSequentialScanBenchmark(t *testing.T) {
-	n := 1000000
-	fmt.Printf("\n=== Sequential & Range Scan Benchmark (1M keys) ===\n")
-
-	dataset := makeShuffledDataset(n, 12345)
-	sortedDataset := make([][2]string, n)
-	copy(sortedDataset, dataset)
-	sort.Slice(sortedDataset, func(i, j int) bool {
-		return sortedDataset[i][0] < sortedDataset[j][0]
-	})
-
-	// Fixed cache budget: 20,000 pages = 80 MB (for 4KB pages)
-	const cachePages = 20000
-	const cacheBytes = cachePages * pageSize
-
-	fmt.Printf("  Cache budget: %d pages (%d MB)\n", cachePages, cacheBytes>>20)
-
-	// Run B+Tree
-	runSequentialBPlusTree(t, n, dataset, sortedDataset, cachePages)
-
-	// Run Pebble
-	runSequentialPebble(t, n, dataset, sortedDataset, cacheBytes)
-}
-
-// B+Tree sequential & range scan runner
-func runSequentialBPlusTree(t *testing.T, n int, dataset, sortedDataset [][2]string, cachePages int) {
-	dbPath := filepath.Join(t.TempDir(), "btree_seq.db")
-	tree := newTree(dbPath, pageSize, order)
-	tree.batchsize = batchSize
-	tree.pager.maxClean = cachePages
-
-	// Write phase
-	startWrite := time.Now()
-	for i := 0; i < n; i++ {
-		tree.insert(dataset[i][0], dataset[i][1])
-	}
-	tree.pager.flush()
-	writeDur := time.Since(startWrite)
-	qpsWrite := float64(n) / writeDur.Seconds()
-
-	// --- Warm-up (sequential read) to populate cache ---
-	for i := 0; i < n; i++ {
-		tree.search(sortedDataset[i][0])
-	}
-
-	// --- Sequential read pass ---
-	latSeq := make([]time.Duration, n)
-	startSeq := time.Now()
-	errSeq := 0
-	for i := 0; i < n; i++ {
-		opStart := time.Now()
-		_, found := tree.search(sortedDataset[i][0])
-		latSeq[i] = time.Since(opStart)
-		if !found {
-			errSeq++
-		}
-	}
-	readDurSeq := time.Since(startSeq)
-	p50seq, p95seq, p99seq := calcPercentiles(latSeq)
-	printResult("B+Tree seq reads", n, readDurSeq, p50seq, p95seq, p99seq, errSeq)
-
-	// --- Range scans (different sizes) ---
-	scanSizes := []int{100, 1000, 10000}
-	rng := rand.New(rand.NewSource(12345))
-	for _, scanSize := range scanSizes {
-		if n <= scanSize {
-			continue
-		}
-		scanCount := 100
-		latScan := make([]time.Duration, scanCount)
-		startScan := time.Now()
-		errScan := 0
-		for i := 0; i < scanCount; i++ {
-			startIdx := rng.Intn(n - scanSize)
-			startKey := sortedDataset[startIdx][0]
-			endKey := sortedDataset[startIdx+scanSize][0]
-
-			opStart := time.Now()
-			keys, vals := tree.scan(startKey, endKey)
-			_ = keys
-			latScan[i] = time.Since(opStart)
-			if len(vals) < scanSize/2 {
-				errScan++
-			}
-		}
-		scanDur := time.Since(startScan)
-		p50s, p95s, p99s := calcPercentiles(latScan)
-		printResult(fmt.Sprintf("B+Tree scan %d", scanSize), scanCount, scanDur, p50s, p95s, p99s, errScan)
-	}
-
-	fmt.Printf("  (write QPS: %.0f)\n", qpsWrite)
-}
-
-// Pebble sequential & range scan runner
-func runSequentialPebble(t *testing.T, n int, dataset, sortedDataset [][2]string, cacheBytes int) {
-	dbPath := filepath.Join(t.TempDir(), "pebble_seq.db")
-	opts := &pebble.Options{
-		Cache:                       pebble.NewCache(int64(cacheBytes)),
-		FS:                          nil,
-		DisableWAL:                  false,
-		MemTableSize:                64 << 20,
-		MemTableStopWritesThreshold: 2,
-		L0CompactionThreshold:       4,
-		L0StopWritesThreshold:       1000,
-		LBaseMaxBytes:               64 << 20,
-		MaxConcurrentCompactions:    nil,
-	}
-
-	db, err := pebble.Open(dbPath, opts)
-	if err != nil {
-		t.Fatalf("Failed to open Pebble: %v", err)
-	}
-
-	// Write
-	startWrite := time.Now()
-	batch := db.NewBatch()
-	for i := 0; i < n; i++ {
-		batch.Set([]byte(dataset[i][0]), []byte(dataset[i][1]), nil)
-		if i%batchSize == 0 && i > 0 {
-			batch.Commit(pebble.Sync)
-			batch.Close()
-			batch = db.NewBatch()
-		}
-	}
-	batch.Commit(pebble.Sync)
-	batch.Close()
-	writeDur := time.Since(startWrite)
-	qpsWrite := float64(n) / writeDur.Seconds()
-	db.Close()
-
-	db, err = pebble.Open(dbPath, opts)
-	if err != nil {
-		t.Fatalf("Failed to reopen Pebble: %v", err)
-	}
-	defer db.Close()
-
-	// --- Warm-up (sequential read) ---
-	for i := 0; i < n; i++ {
-		_, closer, _ := db.Get([]byte(sortedDataset[i][0]))
-		if closer != nil {
-			closer.Close()
-		}
-	}
-
-	// --- Sequential read pass ---
-	latSeq := make([]time.Duration, n)
-	startSeq := time.Now()
-	errSeq := 0
-	for i := 0; i < n; i++ {
-		opStart := time.Now()
-		_, closer, err := db.Get([]byte(sortedDataset[i][0]))
-		if err != nil && err != pebble.ErrNotFound {
-			errSeq++
-		}
-		if closer != nil {
-			closer.Close()
-		}
-		latSeq[i] = time.Since(opStart)
-	}
-	readDurSeq := time.Since(startSeq)
-	p50seq, p95seq, p99seq := calcPercentiles(latSeq)
-	printResult("Pebble seq reads", n, readDurSeq, p50seq, p95seq, p99seq, errSeq)
-
-	// --- Range scans ---
-	scanSizes := []int{100, 1000, 10000}
-	rng := rand.New(rand.NewSource(12345))
-	for _, scanSize := range scanSizes {
-		if n <= scanSize {
-			continue
-		}
-		scanCount := 100
-		latScan := make([]time.Duration, scanCount)
-		startScan := time.Now()
-		errScan := 0
-		for i := 0; i < scanCount; i++ {
-			startIdx := rng.Intn(n - scanSize)
-			startKey := sortedDataset[startIdx][0]
-			endKey := sortedDataset[startIdx+scanSize][0]
-
-			opStart := time.Now()
-			iter, err := db.NewIter(&pebble.IterOptions{
-				LowerBound: []byte(startKey),
-				UpperBound: []byte(endKey),
-			})
-			if err != nil {
-				errScan++
-				continue
-			}
-			count := 0
-			if iter.SeekGE([]byte(startKey)) {
-				for ; iter.Valid(); iter.Next() {
-					count++
-					if count >= scanSize {
-						break
-					}
-				}
-			}
-			iter.Close()
-			latScan[i] = time.Since(opStart)
-			if count < scanSize/2 {
-				errScan++
-			}
-		}
-		scanDur := time.Since(startScan)
-		p50s, p95s, p99s := calcPercentiles(latScan)
-		printResult(fmt.Sprintf("Pebble scan %d", scanSize), scanCount, scanDur, p50s, p95s, p99s, errScan)
 	}
 
 	fmt.Printf("  (write QPS: %.0f)\n", qpsWrite)

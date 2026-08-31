@@ -1,0 +1,202 @@
+Benchmark results before wiring the B+ tree into raft.
+
+Before split opt:
+=== Dataset: 100 keys ===
+  B+Tree cache: 64 KB | actual data: 4 KB
+B+Tree warm reads      |     100 ops |   7973210 qps | p50=   84ns | p95=  125ns | p99=  375ns | errs=0
+B+Tree seq reads       |     100 ops |  10084712 qps | p50=   42ns | p95=   84ns | p99=  125ns | errs=0
+B+Tree cold reads      |     100 ops |   5517241 qps | p50=   83ns | p95=  125ns | p99=6.792µs | errs=0
+  (write QPS: 32658)
+  SQLite cache: 16 pages (64 KB) | actual data: 12 KB
+SQLite cold reads      |     100 ops |     74899 qps | p50=12.75µs | p95=15.708µs | p99=34.084µs | errs=0
+SQLite warm reads      |     100 ops |    128673 qps | p50=7.459µs | p95=8.834µs | p99=19.542µs | errs=0
+SQLite seq reads       |     100 ops |    130506 qps | p50=7.416µs | p95=9.041µs | p99=15.417µs | errs=0
+  (write QPS: 358262)
+  Pebble cache: 64 KB | actual data: 3 KB
+Pebble cold reads      |     100 ops |     46919 qps | p50=4.917µs | p95=32.084µs | p99=915.5µs | errs=0
+Pebble warm reads      |     100 ops |    183570 qps | p50=4.708µs | p95=6.625µs | p99=51.083µs | errs=0
+Pebble seq reads       |     100 ops |    171945 qps | p50= 4.75µs | p95=13.917µs | p99=32.084µs | errs=0
+  (write QPS: 30481)
+
+=== Dataset: 1000 keys ===
+  B+Tree cache: 64 KB | actual data: 92 KB
+B+Tree warm reads      |    1000 ops |   3688907 qps | p50=  167ns | p95=  250ns | p99=1.209µs | errs=0
+B+Tree seq reads       |    1000 ops |   5627177 qps | p50=  125ns | p95=  167ns | p99=  209ns | errs=0
+B+Tree cold reads      |    1000 ops |    135823 qps | p50=6.458µs | p95=11.292µs | p99=39.541µs | errs=0
+B+Tree range scans     |     100 ops |     58379 qps | p50=13.875µs | p95=44.25µs | p99=102.5µs | errs=0
+  (write QPS: 90999)
+  SQLite cache: 16 pages (64 KB) | actual data: 60 KB
+SQLite cold reads      |    1000 ops |    115503 qps | p50=7.625µs | p95=9.875µs | p99=29.083µs | errs=0
+SQLite warm reads      |    1000 ops |    136399 qps | p50=7.166µs | p95=7.833µs | p99=10.583µs | errs=0
+SQLite seq reads       |    1000 ops |    142028 qps | p50=6.833µs | p95=7.375µs | p99=10.083µs | errs=0
+SQLite range scans     |     100 ops |     16220 qps | p50=58.75µs | p95=74.042µs | p99=156.375µs | errs=0
+  (write QPS: 444856)
+  Pebble cache: 64 KB | actual data: 23 KB
+Pebble cold reads      |    1000 ops |    211668 qps | p50=4.458µs | p95=4.917µs | p99=  7.5µs | errs=0
+Pebble warm reads      |    1000 ops |    204271 qps | p50=4.333µs | p95=7.125µs | p99=13.958µs | errs=0
+Pebble seq reads       |    1000 ops |    232223 qps | p50=4.125µs | p95=4.666µs | p99=9.541µs | errs=0
+Pebble range scans     |     100 ops |     93845 qps | p50=   11µs | p95=12.166µs | p99=26.917µs | errs=0
+  (write QPS: 368087)
+
+=== Dataset: 10000 keys ===
+  B+Tree cache: 97 KB | actual data: 940 KB
+B+Tree warm reads      |   10000 ops |    387087 qps | p50= 2.75µs | p95= 6.25µs | p99=12.333µs | errs=0
+B+Tree seq reads       |   10000 ops |   5571546 qps | p50=  125ns | p95=  166ns | p99=2.583µs | errs=0
+B+Tree cold reads      |   10000 ops |    128211 qps | p50=6.083µs | p95=11.625µs | p99=42.375µs | errs=0
+B+Tree range scans     |     100 ops |     65844 qps | p50=12.875µs | p95=24.75µs | p99=85.958µs | errs=0
+  (write QPS: 101926)
+  SQLite cache: 24 pages (97 KB) | actual data: 472 KB
+SQLite cold reads      |   10000 ops |    139337 qps | p50=7.042µs | p95= 8.25µs | p99=10.75µs | errs=0
+SQLite warm reads      |   10000 ops |    140808 qps | p50=    7µs | p95=8.125µs | p99=10.792µs | errs=0
+SQLite seq reads       |   10000 ops |    138740 qps | p50=7.041µs | p95=7.959µs | p99=10.833µs | errs=0
+SQLite range scans     |     100 ops |      9106 qps | p50=107.5µs | p95=130.583µs | p99=157.167µs | errs=0
+  (write QPS: 387948)
+  Pebble cache: 97 KB | actual data: 226 KB
+Pebble cold reads      |   10000 ops |    164634 qps | p50=5.083µs | p95=   16µs | p99=18.625µs | errs=0
+Pebble warm reads      |   10000 ops |    208499 qps | p50=  4.5µs | p95=5.209µs | p99=12.75µs | errs=0
+Pebble seq reads       |   10000 ops |    212413 qps | p50=4.417µs | p95=5.333µs | p99=12.667µs | errs=0
+Pebble range scans     |     100 ops |     95099 qps | p50=10.333µs | p95=14.625µs | p99=22.125µs | errs=0
+  (write QPS: 244170)
+
+=== Dataset: 100000 keys ===
+  B+Tree cache: 976 KB | actual data: 8960 KB
+B+Tree warm reads      |  100000 ops |    335914 qps | p50= 3.25µs | p95=7.042µs | p99=10.75µs | errs=0
+B+Tree seq reads       |  100000 ops |   4409908 qps | p50=  125ns | p95=  208ns | p99=3.042µs | errs=0
+B+Tree cold reads      |  100000 ops |    118577 qps | p50= 7.25µs | p95=11.625µs | p99=28.834µs | errs=0
+B+Tree range scans     |     100 ops |     73532 qps | p50=12.75µs | p95=17.833µs | p99=23.792µs | errs=0
+  (write QPS: 64306)
+  SQLite cache: 244 pages (976 KB) | actual data: 4784 KB
+SQLite cold reads      |  100000 ops |    134991 qps | p50=7.209µs | p95=8.625µs | p99=11.041µs | errs=0
+SQLite warm reads      |  100000 ops |    137562 qps | p50=7.208µs | p95=8.125µs | p99=10.542µs | errs=0
+SQLite seq reads       |  100000 ops |    135957 qps | p50= 7.25µs | p95=8.208µs | p99=10.625µs | errs=0
+SQLite range scans     |     100 ops |      7773 qps | p50=122.625µs | p95=165.417µs | p99=220.042µs | errs=0
+  (write QPS: 273954)
+  Pebble cache: 976 KB | actual data: 2250 KB
+Pebble cold reads      |  100000 ops |    133585 qps | p50=6.542µs | p95=14.416µs | p99=28.083µs | errs=0
+Pebble warm reads      |  100000 ops |    145247 qps | p50=  6.5µs | p95=7.959µs | p99=14.958µs | errs=0
+Pebble seq reads       |  100000 ops |    145779 qps | p50=6.209µs | p95=9.083µs | p99=16.209µs | errs=0
+Pebble range scans     |     100 ops |     73753 qps | p50= 13.5µs | p95=14.583µs | p99=42.209µs | errs=0
+  (write QPS: 332811)
+=== Dataset: 1000000 keys ===
+  B+Tree cache: 10644 KB | actual data: 90864 KB
+B+Tree warm reads      | 1000000 ops |    268557 qps | p50=3.833µs | p95=7.667µs | p99=12.833µs | errs=0
+B+Tree seq reads       | 1000000 ops |   3631085 qps | p50=  167ns | p95=  209ns | p99=3.208µs | errs=0
+B+Tree cold reads      | 1000000 ops |     85557 qps | p50=10.125µs | p95=15.958µs | p99=23.625µs | errs=0
+B+Tree range scans     |     100 ops |     46418 qps | p50=17.583µs | p95=36.583µs | p99=111.125µs | errs=0
+  (write QPS: 29686)
+  SQLite cache: 2661 pages (10644 KB) | actual data: 50812 KB
+SQLite cold reads      | 1000000 ops |    123065 qps | p50=7.875µs | p95=8.833µs | p99=11.542µs | errs=0
+SQLite warm reads      | 1000000 ops |    125851 qps | p50=7.875µs | p95=8.875µs | p99=11.417µs | errs=0
+SQLite seq reads       | 1000000 ops |    122672 qps | p50=8.084µs | p95=9.166µs | p99=11.542µs | errs=0
+SQLite range scans     |     100 ops |      5062 qps | p50=192.666µs | p95=227.5µs | p99=320.083µs | errs=0
+  (write QPS: 51914)
+  Pebble cache: 10644 KB | actual data: 24250 KB
+Pebble cold reads      | 1000000 ops |    130578 qps | p50=7.083µs | p95=8.542µs | p99=16.291µs | errs=0
+Pebble warm reads      | 1000000 ops |    133147 qps | p50=7.083µs | p95=8.458µs | p99=15.625µs | errs=0
+Pebble seq reads       | 1000000 ops |    137583 qps | p50=6.583µs | p95=14.625µs | p99=15.791µs | errs=0
+Pebble range scans     |     100 ops |     72324 qps | p50=13.708µs | p95=16.584µs | p99= 28.5µs | errs=0
+  (write QPS: 317542)
+time: 120s
+
+After split opt: 
+
+=== Dataset: 100 keys ===
+  B+Tree cache: 64 KB | actual data: 4 KB
+B+Tree warm reads      |     100 ops |   7547170 qps | p50=   83ns | p95=  167ns | p99=  833ns | errs=0
+B+Tree seq reads       |     100 ops |   8759636 qps | p50=   83ns | p95=  125ns | p99=  542ns | errs=0
+B+Tree cold reads      |     100 ops |   4387504 qps | p50=   83ns | p95=  125ns | p99=11.208µs | errs=0
+  (write QPS: 13958)
+  SQLite cache: 16 pages (64 KB) | actual data: 12 KB
+SQLite cold reads      |     100 ops |     85849 qps | p50=10.958µs | p95=14.458µs | p99=32.875µs | errs=0
+SQLite warm reads      |     100 ops |     57486 qps | p50=11.084µs | p95=75.542µs | p99=162.875µs | errs=0
+SQLite seq reads       |     100 ops |    114052 qps | p50=8.125µs | p95=11.292µs | p99=22.666µs | errs=0
+  (write QPS: 256164)
+  Pebble cache: 64 KB | actual data: 3 KB
+Pebble cold reads      |     100 ops |    129793 qps | p50=4.375µs | p95=10.834µs | p99=175.125µs | errs=0
+Pebble warm reads      |     100 ops |    204308 qps | p50=4.375µs | p95=6.042µs | p99=29.542µs | errs=0
+Pebble seq reads       |     100 ops |    222945 qps | p50=4.334µs | p95= 4.75µs | p99=8.375µs | errs=0
+  (write QPS: 34973)
+
+=== Dataset: 1000 keys ===
+  B+Tree cache: 64 KB | actual data: 56 KB
+B+Tree warm reads      |    1000 ops |   4093479 qps | p50=  167ns | p95=  209ns | p99=  416ns | errs=0
+B+Tree seq reads       |    1000 ops |   6004491 qps | p50=  125ns | p95=  167ns | p99=  208ns | errs=0
+B+Tree cold reads      |    1000 ops |    126126 qps | p50=6.333µs | p95= 20.5µs | p99=46.917µs | errs=0
+B+Tree range scans     |     100 ops |     48760 qps | p50=14.542µs | p95=60.125µs | p99=137.958µs | errs=0
+  (write QPS: 77674)
+  SQLite cache: 16 pages (64 KB) | actual data: 60 KB
+SQLite cold reads      |    1000 ops |    134052 qps | p50=7.292µs | p95=7.875µs | p99=9.833µs | errs=0
+SQLite warm reads      |    1000 ops |    135945 qps | p50=6.959µs | p95=7.667µs | p99=15.875µs | errs=0
+SQLite seq reads       |    1000 ops |    140680 qps | p50=6.667µs | p95= 7.25µs | p99=10.875µs | errs=0
+SQLite range scans     |     100 ops |     16984 qps | p50=56.917µs | p95=71.375µs | p99=101.25µs | errs=0
+  (write QPS: 531103)
+  Pebble cache: 64 KB | actual data: 23 KB
+Pebble cold reads      |    1000 ops |    223507 qps | p50=4.292µs | p95=4.583µs | p99=5.667µs | errs=0
+Pebble warm reads      |    1000 ops |    237356 qps | p50=4.125µs | p95=4.417µs | p99= 4.75µs | errs=0
+Pebble seq reads       |    1000 ops |    246673 qps | p50=3.958µs | p95=4.375µs | p99=4.708µs | errs=0
+Pebble range scans     |     100 ops |     61167 qps | p50=10.708µs | p95=84.375µs | p99=158.417µs | errs=0
+  (write QPS: 317016)
+
+=== Dataset: 10000 keys ===
+  B+Tree cache: 97 KB | actual data: 480 KB
+B+Tree warm reads      |   10000 ops |    389411 qps | p50=2.709µs | p95=6.333µs | p99=10.958µs | errs=0
+B+Tree seq reads       |   10000 ops |   5700715 qps | p50=  125ns | p95=  167ns | p99=2.542µs | errs=0
+B+Tree cold reads      |   10000 ops |    132987 qps | p50=5.959µs | p95=11.625µs | p99=37.541µs | errs=0
+B+Tree range scans     |     100 ops |     68813 qps | p50=12.042µs | p95= 24.5µs | p99=72.667µs | errs=0
+  (write QPS: 99923)
+  SQLite cache: 24 pages (97 KB) | actual data: 472 KB
+SQLite cold reads      |   10000 ops |    141093 qps | p50=6.959µs | p95=7.916µs | p99=10.708µs | errs=0
+SQLite warm reads      |   10000 ops |    142244 qps | p50=6.917µs | p95=7.709µs | p99=10.416µs | errs=0
+SQLite seq reads       |   10000 ops |    140311 qps | p50=    7µs | p95=7.834µs | p99=10.542µs | errs=0
+SQLite range scans     |     100 ops |      8979 qps | p50=108.042µs | p95=136.166µs | p99=168.75µs | errs=0
+  (write QPS: 459266)
+  Pebble cache: 97 KB | actual data: 226 KB
+
+Pebble cold reads      |   10000 ops |    174358 qps | p50=    5µs | p95=15.25µs | p99=17.209µs | errs=0
+Pebble warm reads      |   10000 ops |    216679 qps | p50=4.417µs | p95=4.958µs | p99=6.709µs | errs=0
+Pebble seq reads       |   10000 ops |    217788 qps | p50=4.333µs | p95=5.791µs | p99=6.584µs | errs=0
+Pebble range scans     |     100 ops |    101544 qps | p50=10.167µs | p95=12.541µs | p99=17.25µs | errs=0
+  (write QPS: 253316)
+
+=== Dataset: 100000 keys ===
+  B+Tree cache: 976 KB | actual data: 4524 KB
+B+Tree warm reads      |  100000 ops |    342849 qps | p50=3.208µs | p95=6.958µs | p99=   10µs | errs=0
+B+Tree seq reads       |  100000 ops |   4332834 qps | p50=  125ns | p95=  208ns | p99=1.875µs | errs=0
+B+Tree cold reads      |  100000 ops |    116422 qps | p50=7.375µs | p95=11.666µs | p99=31.666µs | errs=0
+B+Tree range scans     |     100 ops |     41562 qps | p50=18.875µs | p95=59.625µs | p99=   87µs | errs=0
+  (write QPS: 90164)
+  SQLite cache: 244 pages (976 KB) | actual data: 4784 KB
+SQLite cold reads      |  100000 ops |    134039 qps | p50=7.292µs | p95=8.541µs | p99=10.958µs | errs=0
+SQLite warm reads      |  100000 ops |    137701 qps | p50=7.167µs | p95=8.125µs | p99=10.584µs | errs=0
+SQLite seq reads       |  100000 ops |    135937 qps | p50= 7.25µs | p95=8.167µs | p99=10.625µs | errs=0
+SQLite range scans     |     100 ops |      7859 qps | p50=123.75µs | p95=150.083µs | p99=222.625µs | errs=0
+  (write QPS: 274849)
+  Pebble cache: 976 KB | actual data: 2250 KB
+Pebble cold reads      |  100000 ops |    144377 qps | p50=6.333µs | p95=8.709µs | p99= 22.5µs | errs=0
+Pebble warm reads      |  100000 ops |    147118 qps | p50=6.333µs | p95=8.709µs | p99=15.166µs | errs=0
+Pebble seq reads       |  100000 ops |    150605 qps | p50=6.167µs | p95=8.542µs | p99=14.875µs | errs=0
+Pebble range scans     |     100 ops |     78914 qps | p50=12.542µs | p95=16.084µs | p99=30.584µs | errs=0
+  (write QPS: 341379)
+
+=== Dataset: 1000000 keys ===
+  B+Tree cache: 10644 KB | actual data: 45700 KB
+B+Tree warm reads      | 1000000 ops |    297560 qps | p50=3.667µs | p95=7.583µs | p99=10.875µs | errs=0
+B+Tree seq reads       | 1000000 ops |   3864475 qps | p50=  167ns | p95=  209ns | p99=1.792µs | errs=0
+B+Tree cold reads      | 1000000 ops |     87741 qps | p50=9.875µs | p95=15.25µs | p99=20.625µs | errs=0
+B+Tree range scans     |     100 ops |     57133 qps | p50=15.417µs | p95=25.709µs | p99=37.459µs | errs=0
+  (write QPS: 44674)
+  SQLite cache: 2661 pages (10644 KB) | actual data: 50812 KB
+SQLite cold reads      | 1000000 ops |    123857 qps | p50=7.834µs | p95=8.916µs | p99=11.458µs | errs=0
+SQLite warm reads      | 1000000 ops |    127173 qps | p50=7.833µs | p95=8.875µs | p99=11.084µs | errs=0
+SQLite seq reads       | 1000000 ops |    123931 qps | p50=8.083µs | p95=8.958µs | p99=11.25µs | errs=0
+SQLite range scans     |     100 ops |      5317 qps | p50=182.542µs | p95=224.792µs | p99=362.625µs | errs=0
+  (write QPS: 55248)
+  Pebble cache: 10644 KB | actual data: 24250 KB
+
+Pebble cold reads      | 1000000 ops |    136278 qps | p50=6.875µs | p95=    8µs | p99=15.375µs | errs=0
+Pebble warm reads      | 1000000 ops |    139416 qps | p50=6.875µs | p95=7.875µs | p99=15.042µs | errs=0
+Pebble seq reads       | 1000000 ops |    143686 qps | p50=6.375µs | p95=9.042µs | p99=15.042µs | errs=0
+Pebble range scans     |     100 ops |     70920 qps | p50=13.542µs | p95=17.541µs | p99=39.542µs | errs=0
+  (write QPS: 337092)
+
+time: 114s
