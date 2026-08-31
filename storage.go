@@ -1,7 +1,6 @@
 package main
 
 import (
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -9,71 +8,41 @@ import (
 
 type KVstore struct {
 	mu   sync.RWMutex
-	dict map[string]string
+	tree *TreeRoot
 }
 
 func get(store *KVstore, key string) (string, bool) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	if store.dict == nil {
-		store.dict = make(map[string]string)
-	}
-	val, ok := store.dict[key]
-	if ok {
-		return val, ok
-	}
-	return "", ok
+	val, ok := store.tree.search(key)
+	return val, ok
 
 }
 
 func put(store *KVstore, key string, val string) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.dict == nil {
-		store.dict = make(map[string]string)
-	}
-	store.dict[key] = val
+	store.tree.insert(key, val)
 }
 
 func remove(store *KVstore, key string) bool {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if store.dict == nil {
-		store.dict = make(map[string]string)
-	}
-
-	_, ok := store.dict[key]
-	if ok {
-		delete(store.dict, key)
-
-	}
-	return ok
+	isDeleted := store.tree.remove(key)
+	return isDeleted
 
 }
 
-func scan(store *KVstore, startKey string, endKey string) map[string]string {
+func scan(store *KVstore, startKey string, endKey string) (keys []string, values []string) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	keys := []string{}
-	for k := range store.dict {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	res := map[string]string{}
-
-	for _, x := range keys {
-		if x >= startKey && x <= endKey {
-			res[x] = store.dict[x]
-
-		}
-
-	}
-	return res
+	keys, vals := store.tree.scan(startKey, endKey)
+	return keys, vals
 
 }
 
 func applyLoop(node *RaftNode) {
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for range ticker.C {
 		node.mu.Lock()

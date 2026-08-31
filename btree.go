@@ -286,7 +286,7 @@ func (t *TreeRoot) scan(start string, end string) (keys []string, values []strin
 
 	return keys, values
 }
-func (t *TreeRoot) remove(key string) {
+func (t *TreeRoot) remove(key string) bool {
 	currPage := t.root
 
 	curr := t.pager.loadNode(currPage)
@@ -323,7 +323,7 @@ func (t *TreeRoot) remove(key string) {
 				t.pager.flush()
 				t.pending = 0
 			}
-			return
+			return true
 		}
 		if curr.keys[mid] > key {
 			r = mid
@@ -331,6 +331,7 @@ func (t *TreeRoot) remove(key string) {
 			l = mid + 1
 		}
 	}
+	return false
 }
 
 func (t *TreeRoot) split(oldPage int64, curr *TreeNode, path []int64, superseded *[]int64) {

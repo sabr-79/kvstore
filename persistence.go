@@ -79,6 +79,33 @@ func persist(node *RaftNode) {
 
 }
 
+func persistLog(node *RaftNode) {
+	node.mu.Lock()
+	if len(node.pendingLog) == 0 {
+		node.mu.Unlock()
+		return
+	}
+	batch := node.pendingLog
+	node.pendingLog = nil
+	node.mu.Unlock()
+	filename := fmt.Sprintf("raft_%s.log", node.id)
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+
+	encode := gob.NewEncoder(file)
+	for _, entry := range batch {
+		if err := encode.Encode(&entry); err != nil {
+			panic(err)
+		}
+	}
+	if err := file.Sync(); err != nil {
+		panic(err)
+	}
+	file.Close()
+}
+
 func readPersistFile(node *RaftNode) {
 
 	filename := fmt.Sprintf("raft_%s.state", node.id)
@@ -97,9 +124,25 @@ func readPersistFile(node *RaftNode) {
 	}
 	node.votedFor = recovered.VotedFor
 	node.currentTerm = recovered.CurrentTerm
-	node.log = recovered.Log
+
+	logfile, err := os.Open(fmt.Sprintf("raft_%s.log", node.id))
+	if err != nil {
+		return
+	}
+
+	decode = gob.NewDecoder(logfile)
+	node.log = nil
+	var entry LogEntry
+	for {
+		err := decode.Decode(&entry)
+		if err != nil {
+			break
+		}
+		node.log = append(node.log, entry)
+	}
 
 	file.Close()
+	logfile.Close()
 
 }
 

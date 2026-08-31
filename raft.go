@@ -38,10 +38,12 @@ type RaftNode struct {
 	electionResetCh chan struct{}
 	leaderId        string
 	isDead          bool
+	pendingLog      []LogEntry
+	batchsize       int
 }
 
 func newRaftNode(id string, peers []string) *RaftNode {
-	newNode := RaftNode{role: Follower, currentTerm: 0, votedFor: "", id: id, peers: peers, electionResetCh: make(chan struct{}, 1)}
+	newNode := RaftNode{role: Follower, currentTerm: 0, votedFor: "", id: id, peers: peers, electionResetCh: make(chan struct{}, 1), batchsize: 100}
 	readPersistFile(&newNode)
 	go electionTimer(&newNode)
 	go applyLoop(&newNode)
@@ -74,15 +76,17 @@ func electionTimer(node *RaftNode) {
 }
 func runHeartbeats(node *RaftNode, _ AppendEntriesArgs) {
 	node.mu.Lock()
+
 	if node.role != Leader {
 		node.mu.Unlock()
 		return
 	}
 
 	node.mu.Unlock()
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for range ticker.C {
+		//persistLog(node)
 		node.mu.Lock()
 		if node.isDead {
 			node.mu.Unlock()
@@ -295,7 +299,11 @@ func appendEntries(node *RaftNode, arg AppendEntriesArgs) ReplyEntriesArgs {
 			if matchEntry < len(node.log) {
 				if entry.Term != node.log[matchEntry].Term || node.log[matchEntry].Command != entry.Command {
 					node.log = node.log[:matchEntry]
-					persist(node)
+					if len(node.pendingLog) >= node.batchsize {
+						node.mu.Unlock()
+						persistLog(node)
+						node.mu.Lock()
+					}
 				}
 
 			}

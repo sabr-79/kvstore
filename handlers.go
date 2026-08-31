@@ -127,7 +127,12 @@ func putHandler(node *RaftNode) http.HandlerFunc {
 
 		var logEntry = LogEntry{Index: len(node.log) + 1, Term: node.currentTerm, Command: "PUT:" + key + ":" + val}
 		node.log = append(node.log, logEntry)
-		persist(node)
+		node.pendingLog = append(node.pendingLog, logEntry)
+		if len(node.pendingLog) >= node.batchsize {
+			node.mu.Unlock()
+			persistLog(node)
+			node.mu.Lock()
+		}
 
 		for node.commitIndex < targetIdx && node.role == Leader {
 			node.mu.Unlock()
@@ -173,7 +178,12 @@ func removeHandler(node *RaftNode) http.HandlerFunc {
 
 		var logEntry = LogEntry{Index: len(node.log) + 1, Term: node.currentTerm, Command: "REMOVE:" + key}
 		node.log = append(node.log, logEntry)
-		persist(node)
+		node.pendingLog = append(node.pendingLog, logEntry)
+		if len(node.pendingLog) >= node.batchsize {
+			node.mu.Unlock()
+			persistLog(node)
+			node.mu.Lock()
+		}
 
 		for node.commitIndex < targetIdx && node.role == Leader {
 			node.mu.Unlock()
@@ -213,21 +223,23 @@ func scanHandler(node *RaftNode) http.HandlerFunc {
 			http.Error(w, "invalid param", http.StatusBadRequest)
 			return
 		}
-		res := scan(node.stateMachine, skey, ekey)
+		resKey, resVal := scan(node.stateMachine, skey, ekey)
 		node.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(struct {
-			Message  string            `json:"message"`
-			StartKey string            `json:"startkey"`
-			EndKey   string            `json:"endkey"`
-			Result   map[string]string `json:"result"`
+			Message  string   `json:"message"`
+			StartKey string   `json:"startkey"`
+			EndKey   string   `json:"endkey"`
+			ResultK  []string `json:"resultK"`
+			ResultV  []string `json:"resultV"`
 		}{
 			Message:  "Scanned keys",
 			StartKey: skey,
 			EndKey:   ekey,
-			Result:   res,
+			ResultK:  resKey,
+			ResultV:  resVal,
 		})
 
 	}
