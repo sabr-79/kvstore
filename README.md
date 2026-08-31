@@ -16,7 +16,7 @@ Currently, it's a distributive KV store using Go's map structure and net/http. T
 - Built the storage engine and benchmarked it against SQLite and PebbleDB
 
 ### Up next 
--  Wire the B+ tree in before working on snapshotting
+-  Implement snapshotting
 
 
 
