@@ -209,68 +209,62 @@ func (t *TreeRoot) scan(start string, end string) (keys []string, values []strin
 	keys = []string{}
 	values = []string{}
 
-	currPage := t.root
-
-	curr := t.pager.loadNode(currPage)
-
-	for !curr.isLeaf {
-		if len(curr.children) == 0 {
-			return keys, values
-		}
-		if len(curr.keys) == 0 {
-			currPage = curr.children[0]
-			curr = t.pager.loadNode(currPage)
-			continue
-		}
-
-		l, r := 0, len(curr.keys)
-		for l < r {
-			mid := l + (r-l)/2
-			if curr.keys[mid] > start {
-				r = mid
-			} else {
-				l = mid + 1
-			}
-		}
-		if l >= len(curr.children) {
-			l = len(curr.children) - 1
-		}
-		if l < 0 {
-			l = 0
-		}
-		currPage = curr.children[l]
-		curr = t.pager.loadNode(currPage)
+	type stackEntry struct {
+		node     *TreeNode
+		childIdx int
 	}
+	stack := []stackEntry{{node: t.pager.loadNode(t.root), childIdx: 0}}
 
-	for currPage != 0 {
+	for len(stack) > 0 {
+		entry := &stack[len(stack)-1]
+		node := entry.node
 
-		if len(curr.keys) == 0 {
-			currPage = curr.nextPage
-			if currPage == 0 {
-				break
+		if node.isLeaf {
+			for i := 0; i < len(node.keys); i++ {
+				key := node.keys[i]
+				if key > end {
+					break
+				}
+				if key >= start {
+					keys = append(keys, key)
+					values = append(values, node.values[i])
+				}
 			}
-			curr = t.pager.loadNode(currPage)
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		if entry.childIdx >= len(node.children) {
+			stack = stack[:len(stack)-1]
 			continue
 		}
 
-		keyCount := len(curr.keys)
+		childIdx := entry.childIdx
+		entry.childIdx++
 
-		for i := 0; i < keyCount; i++ {
-			key := curr.keys[i]
-			if key > end {
-				return keys, values
-			}
-			if key >= start {
-				keys = append(keys, key)
-				values = append(values, curr.values[i])
-			}
+		var childMax string
+		if childIdx < len(node.keys) {
+			childMax = node.keys[childIdx]
+		} else {
+			childMax = ""
 		}
 
-		currPage = curr.nextPage
-		if currPage == 0 {
-			break
+		if childMax != "" && start >= childMax {
+			continue
 		}
-		curr = t.pager.loadNode(currPage)
+
+		var childMin string
+		if childIdx > 0 {
+			childMin = node.keys[childIdx-1]
+		} else {
+			childMin = ""
+		}
+		if childMin != "" && end < childMin {
+			continue
+		}
+
+		childPage := node.children[childIdx]
+		childNode := t.pager.loadNode(childPage)
+		stack = append(stack, stackEntry{node: childNode, childIdx: 0})
 	}
 
 	return keys, values

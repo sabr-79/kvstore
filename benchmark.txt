@@ -200,3 +200,16 @@ Pebble range scans     |     100 ops |     70920 qps | p50=13.542µs | p95=17.54
   (write QPS: 337092)
 
 time: 114s
+
+Raft PUT               |   20000 ops |      3003 qps | p50=5.288666ms | p95=10.859292ms | p99=13.101334ms | errs=0
+Raft GET               |   20000 ops |     18000 qps | p50=49.75µs | p95=67.25µs | p99=139.458µs | errs=0
+Time: 9.9s
+
+Updated 1M with COW
+=== Dataset: 1000000 keys ===
+  B+Tree cache: 10644 KB | actual data: 45708 KB
+B+Tree warm reads      | 1000000 ops |    226334 qps | p50=4.333µs | p95=7.833µs | p99=13.417µs | errs=0
+B+Tree seq reads       | 1000000 ops |   3992074 qps | p50=  167ns | p95=  209ns | p99=3.375µsµs | errs=0
+B+Tree cold reads      | 1000000 ops |     91051 qps | p50=9.709µs | p95=14.958µs | p99=20.542µs | errs=0
+B+Tree range scans     |     100 ops |     48470 qps | p50=17.125µs | p95=30.25µs | p99=110.25µs | errs=0
+(write QPS: 27022)
