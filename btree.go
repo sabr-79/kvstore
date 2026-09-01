@@ -163,27 +163,8 @@ func (t *TreeRoot) insert(key string, val string) {
 	for l < r {
 		mid := l + (r-l)/2
 		if curr.keys[mid] == key {
-			curr.values[mid] = val
-			if nodeEncodedSize(curr) > t.pager.pagesize {
-				superseded := []int64{}
-				t.split(currPage, curr, path, &superseded)
-				t.freelist = append(t.freelist, superseded...)
-				t.commitMetadata()
-				t.pending++
-				if t.pending >= t.batchsize {
-					t.pager.flush()
-					t.pending = 0
-				}
-				return
-			}
-
-			t.pager.writeNode(currPage, curr)
-			t.pending++
-			if t.pending >= t.batchsize {
-				t.pager.flush()
-				t.pending = 0
-			}
-			return
+			l = mid
+			break
 		}
 		if curr.keys[mid] > key {
 			r = mid
@@ -192,19 +173,27 @@ func (t *TreeRoot) insert(key string, val string) {
 		}
 	}
 
-	curr.keys = append(curr.keys, "")
-	curr.values = append(curr.values, "")
-	copy(curr.keys[l+1:], curr.keys[l:])
-	copy(curr.values[l+1:], curr.values[l:])
-	curr.keys[l] = key
-	curr.values[l] = val
-
-	superseded := []int64{}
-
-	if nodeEncodedSize(curr) > t.pager.pagesize || len(curr.keys) >= t.order {
-		t.split(currPage, curr, path, &superseded)
+	newLeaf := curr.clone()
+	if l < len(curr.keys) && curr.keys[l] == key {
+		newLeaf.values[l] = val
 	} else {
-		t.pager.writeNode(currPage, curr)
+		newLeaf.keys = append(newLeaf.keys, "")
+		newLeaf.values = append(newLeaf.values, "")
+		copy(newLeaf.keys[l+1:], newLeaf.keys[l:])
+		copy(newLeaf.values[l+1:], newLeaf.values[l:])
+		newLeaf.keys[l] = key
+		newLeaf.values[l] = val
+
+	}
+	superseded := []int64{}
+	if nodeEncodedSize(newLeaf) > t.pager.pagesize || len(newLeaf.keys) >= t.order {
+		t.split(currPage, newLeaf, path, &superseded)
+	} else {
+		newLeafPage := t.allocatePage()
+		t.pager.writeNode(newLeafPage, newLeaf)
+		superseded = append(superseded, currPage)
+		t.updateParentLinks(path, currPage, newLeafPage, &superseded)
+
 	}
 
 	t.freelist = append(t.freelist, superseded...)
@@ -307,15 +296,20 @@ func (t *TreeRoot) remove(key string) bool {
 
 		curr = t.pager.loadNode(currPage)
 	}
-
+	superseded := []int64{}
 	l, r := 0, len(curr.keys)
 	for l < r {
 		mid := l + (r-l)/2
 		if curr.keys[mid] == key {
-			curr.keys = slices.Delete(curr.keys, mid, mid+1)
-			curr.values = slices.Delete(curr.values, mid, mid+1)
+			newLeaf := curr.clone()
+			newLeaf.keys = slices.Delete(curr.keys, mid, mid+1)
+			newLeaf.values = slices.Delete(curr.values, mid, mid+1)
 
-			t.pager.writeNode(currPage, curr)
+			newLeafPage := t.allocatePage()
+			t.pager.writeNode(newLeafPage, newLeaf)
+			superseded = append(superseded, currPage)
+			t.updateParentLinks(path, currPage, newLeafPage, &superseded)
+			t.freelist = append(t.freelist, superseded...)
 
 			t.commitMetadata()
 			t.pending++
@@ -339,21 +333,24 @@ func (t *TreeRoot) split(oldPage int64, curr *TreeNode, path []int64, superseded
 	var key string
 
 	if curr.isLeaf {
+		leftNode := curr.clone()
 		rightPage := t.allocatePage()
+		leftPage := t.allocatePage()
 		rightNode := &TreeNode{isLeaf: true, order: curr.order}
 
 		rightNode.keys = append([]string{}, curr.keys[mid:]...)
 		rightNode.values = append([]string{}, curr.values[mid:]...)
 
 		oldNext := curr.nextPage
-		curr.keys = curr.keys[:mid]
-		curr.values = curr.values[:mid]
-		curr.nextPage = rightPage
+		leftNode.keys = leftNode.keys[:mid]
+		leftNode.values = leftNode.values[:mid]
+		leftNode.nextPage = rightPage
 		rightNode.nextPage = oldNext
 
-		t.pager.writeNode(oldPage, curr)
+		t.pager.writeNode(leftPage, leftNode)
 
 		t.pager.writeNode(rightPage, rightNode)
+		*superseded = append(*superseded, oldPage)
 
 		key = rightNode.keys[0]
 
@@ -362,13 +359,13 @@ func (t *TreeRoot) split(oldPage int64, curr *TreeNode, path []int64, superseded
 			newRootPage := t.allocatePage()
 			newRoot := &TreeNode{isLeaf: false, order: curr.order}
 			newRoot.keys = []string{key}
-			newRoot.children = []int64{oldPage, rightPage}
+			newRoot.children = []int64{leftPage, rightPage}
 			t.pager.writeNode(newRootPage, newRoot)
 			t.root = newRootPage
 		} else {
 			parentPage := path[len(path)-2]
 			newPath := path[:len(path)-1]
-			t.insertIntoParent(parentPage, newPath, key, oldPage, rightPage, oldPage, superseded)
+			t.insertIntoParent(parentPage, newPath, key, leftPage, rightPage, oldPage, superseded)
 		}
 	} else {
 
@@ -378,11 +375,12 @@ func (t *TreeRoot) split(oldPage int64, curr *TreeNode, path []int64, superseded
 		key = curr.keys[mid]
 		rightNode.keys = append([]string{}, curr.keys[mid+1:]...)
 		rightNode.children = append([]int64{}, curr.children[mid+1:]...)
-		curr.keys = curr.keys[:mid]
-		curr.children = curr.children[:mid+1]
+		leftNode := curr.clone()
+		leftNode.keys = curr.keys[:mid]
+		leftNode.children = curr.children[:mid+1]
 
 		leftPage := t.allocatePage()
-		t.pager.writeNode(leftPage, curr)
+		t.pager.writeNode(leftPage, leftNode)
 		t.pager.writeNode(rightPage, rightNode)
 		*superseded = append(*superseded, oldPage)
 
@@ -404,35 +402,36 @@ func (t *TreeRoot) split(oldPage int64, curr *TreeNode, path []int64, superseded
 func (t *TreeRoot) insertIntoParent(parentPage int64, path []int64, key string, left int64, right int64, oldChild int64, superseded *[]int64) {
 
 	parent := t.pager.loadNode(parentPage)
+	parentCopy := parent.clone()
 
-	for i := 0; i < len(parent.children); i++ {
-		if parent.children[i] == oldChild {
-			parent.children[i] = left
+	for i := 0; i < len(parentCopy.children); i++ {
+		if parentCopy.children[i] == oldChild {
+			parentCopy.children[i] = left
 			break
 		}
 	}
 
-	l, r := 0, len(parent.keys)
+	l, r := 0, len(parentCopy.keys)
 	for l < r {
 		mid := l + (r-l)/2
-		if parent.keys[mid] > key {
+		if parentCopy.keys[mid] > key {
 			r = mid
 		} else {
 			l = mid + 1
 		}
 	}
-	parent.keys = append(parent.keys, "")
-	parent.children = append(parent.children, 0)
-	copy(parent.keys[l+1:], parent.keys[l:])
-	parent.keys[l] = key
-	copy(parent.children[l+2:], parent.children[l+1:])
-	parent.children[l+1] = right
+	parentCopy.keys = append(parentCopy.keys, "")
+	parentCopy.children = append(parentCopy.children, 0)
+	copy(parentCopy.keys[l+1:], parentCopy.keys[l:])
+	parentCopy.keys[l] = key
+	copy(parentCopy.children[l+2:], parentCopy.children[l+1:])
+	parentCopy.children[l+1] = right
 
-	if len(parent.keys) >= parent.order {
-		t.split(parentPage, parent, path, superseded)
+	if len(parentCopy.keys) >= parentCopy.order {
+		t.split(parentPage, parentCopy, path, superseded)
 	} else {
 		newParent := t.allocatePage()
-		t.pager.writeNode(newParent, parent)
+		t.pager.writeNode(newParent, parentCopy)
 		*superseded = append(*superseded, parentPage)
 		t.updateParentLinks(path, parentPage, newParent, superseded)
 	}
@@ -447,15 +446,29 @@ func (t *TreeRoot) updateParentLinks(path []int64, oldPage int64, newPage int64,
 	parentPage := path[len(path)-2]
 
 	parent := t.pager.loadNode(parentPage)
-
-	for i := 0; i < len(parent.children); i++ {
-		if parent.children[i] == oldPage {
-			parent.children[i] = newPage
+	parentCopy := parent.clone()
+	for i := 0; i < len(parentCopy.children); i++ {
+		if parentCopy.children[i] == oldPage {
+			parentCopy.children[i] = newPage
 			break
 		}
 	}
 
-	t.pager.writeNode(parentPage, parent)
+	newParent := t.allocatePage()
 
-	t.updateParentLinks(path[:len(path)-1], parentPage, parentPage, superseded)
+	t.pager.writeNode(newParent, parentCopy)
+	*superseded = append(*superseded, parentPage)
+
+	t.updateParentLinks(path[:len(path)-1], parentPage, newParent, superseded)
+}
+
+func (n *TreeNode) clone() *TreeNode {
+	return &TreeNode{
+		isLeaf:   n.isLeaf,
+		order:    n.order,
+		keys:     append([]string{}, n.keys...),
+		values:   append([]string{}, n.values...),
+		children: append([]int64{}, n.children...),
+		nextPage: n.nextPage,
+	}
 }
