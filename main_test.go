@@ -3,12 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -134,7 +136,6 @@ func TestRaftKVStore(t *testing.T) {
 		tmpDirs[i] = t.TempDir()
 	}
 
-	// Step 1: Initialize local HTTP mock servers
 	for i := 0; i < clusterSize; i++ {
 		mux := http.NewServeMux()
 		server := httptest.NewServer(mux)
@@ -149,7 +150,6 @@ func TestRaftKVStore(t *testing.T) {
 		}
 	}()
 
-	// Step 2: Boot up nodes and hook up all operational handlers
 	for i := 0; i < clusterSize; i++ {
 		id := addresses[i]
 		var peers []string
@@ -175,7 +175,6 @@ func TestRaftKVStore(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	// Step 3: Explicitly establish Node 0 as the current Leader
 	leaderIdx := 0
 	leaderNode := nodes[leaderIdx]
 	leaderNode.mu.Lock()
@@ -190,7 +189,6 @@ func TestRaftKVStore(t *testing.T) {
 	}
 	leaderNode.mu.Unlock()
 
-	// Direct followers to know who the leader is so HTTP redirection works
 	for i, node := range nodes {
 		if i != leaderIdx {
 			node.mu.Lock()
@@ -201,15 +199,11 @@ func TestRaftKVStore(t *testing.T) {
 		}
 	}
 
-	// Kick off background heartbeats/replication on our designated leader
 	go runHeartbeats(leaderNode, AppendEntriesArgs{})
 	time.Sleep(100 * time.Millisecond)
 
 	client := &http.Client{Timeout: 300 * time.Millisecond}
 
-	// ==========================================
-	// ACTION 1: Test PUT across the cluster
-	// ==========================================
 	t.Log("[STAGE 1] Injecting sequential PUT operations via the leader...")
 	kvPairs := map[string]string{
 		"apple":  "red",
@@ -226,12 +220,8 @@ func TestRaftKVStore(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Wait for consensus replication and background storage application
 	time.Sleep(400 * time.Millisecond)
 
-	// ==========================================
-	// ACTION 2: Test GET on every node (Follower reads redirect or serve)
-	// ==========================================
 	t.Log("[STAGE 2] Verifying data replication with GET requests...")
 	for idx, nodeAddr := range addresses {
 		getURL := "http://" + nodeAddr + "/get?key=banana"
@@ -259,9 +249,6 @@ func TestRaftKVStore(t *testing.T) {
 		}
 	}
 
-	// ==========================================
-	// ACTION 3: Test SCAN on the leader
-	// ==========================================
 	t.Log("[STAGE 3] Executing SCAN operation to check range queries...")
 	scanURL := "http://" + addresses[leaderIdx] + "/scan?startKey=apple&endKey=banana"
 	resp, err := client.Get(scanURL)
@@ -280,16 +267,12 @@ func TestRaftKVStore(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&scanResult)
 	resp.Body.Close()
 
-	// Range [apple, banana] should capture "apple" and "banana", but exclude "cherry"
 	if len(scanResult.ResultK) != 2 {
 		t.Errorf("SCAN returned %d keys, expected 2", len(scanResult.ResultK))
 	} else {
 		t.Logf("SCAN ok: %v", scanResult.ResultK)
 	}
 
-	// ==========================================
-	// ACTION 4: Test REMOVE replication
-	// ==========================================
 	t.Log("[STAGE 4] Testing REMOVE operation replication...")
 	removeReq, _ := http.NewRequest(http.MethodDelete, "http://"+addresses[leaderIdx]+"/remove?key=apple", nil)
 	removeResp, err := client.Do(removeReq)
@@ -298,10 +281,8 @@ func TestRaftKVStore(t *testing.T) {
 	}
 	removeResp.Body.Close()
 
-	// Wait for the deletion log entry to traverse the cluster and execute
 	time.Sleep(400 * time.Millisecond)
 
-	// Validate 'apple' is missing across all storage engines
 	for idx, node := range nodes {
 		node.mu.Lock()
 		_, found := node.stateMachine.tree.search("apple")
@@ -885,6 +866,269 @@ func TestRaftThroughput(t *testing.T) {
 			getErrs++
 			continue
 		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Logf("GET status: %d", resp.StatusCode)
+			getErrs++
+		}
+	}
+	getDur := time.Since(getStart)
+	p50g, p95g, p99g := calcPercentiles(getLatencies)
+	printResult("Raft GET", N, getDur, p50g, p95g, p99g, getErrs)
+}
+func TestBPlusTreeManyOrders(t *testing.T) {
+	const N = 10000
+	orders := [][]string{
+		func() []string {
+			keys := make([]string, N)
+			for i := 0; i < N; i++ {
+				keys[i] = fmt.Sprintf("key_%d", i)
+			}
+			return keys
+		}(),
+		func() []string {
+			keys := make([]string, N)
+			for i := 0; i < N; i++ {
+				keys[i] = fmt.Sprintf("key_%d", N-1-i)
+			}
+			return keys
+		}(),
+	}
+	for seed := 0; seed < 5; seed++ {
+		r := rand.New(rand.NewSource(int64(seed)))
+		keys := make([]string, N)
+		for i := 0; i < N; i++ {
+			keys[i] = fmt.Sprintf("key_%d", i)
+		}
+		r.Shuffle(len(keys), func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
+		orders = append(orders, keys)
+	}
+
+	for orderIdx, keys := range orders {
+		tree := newTree(filepath.Join(t.TempDir(), fmt.Sprintf("order_%d.db", orderIdx)), 4096, 128)
+		for _, key := range keys {
+			tree.insert(key, "val_"+key)
+		}
+		for _, key := range keys {
+			if _, found := tree.search(key); !found {
+				t.Fatalf("Order %d: key %s missing", orderIdx, key)
+			}
+		}
+		if err := verifyTreeInvariants(tree); err != nil {
+			t.Fatalf("Order %d: invariant violation: %v", orderIdx, err)
+		}
+	}
+}
+
+func TestRaftThroughput2(t *testing.T) {
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 50,
+		MaxConnsPerHost:     50,
+		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   false,
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   20 * time.Second,
+	}
+	defer transport.CloseIdleConnections()
+
+	tmpDir := t.TempDir()
+	clusterSize := 3
+	servers := make([]*httptest.Server, clusterSize)
+	nodes := make([]*RaftNode, clusterSize)
+	addresses := make([]string, clusterSize)
+
+	for i := 0; i < clusterSize; i++ {
+		mux := http.NewServeMux()
+		server := httptest.NewServer(mux)
+		servers[i] = server
+		parsedURL, _ := url.Parse(server.URL)
+		addresses[i] = parsedURL.Host
+	}
+	defer func() {
+		for _, s := range servers {
+			s.Close()
+		}
+	}()
+
+	for i := 0; i < clusterSize; i++ {
+		var peers []string
+		for j := 0; j < clusterSize; j++ {
+			if i != j {
+				peers = append(peers, addresses[j])
+			}
+		}
+
+		dbPath := filepath.Join(tmpDir, fmt.Sprintf("node_%d.db", i))
+		node := newRaftNode(addresses[i], peers)
+		node.batchsize = 1000
+		node.stateMachine = &KVstore{tree: newTree(dbPath, 4096, 128)}
+		node.stateMachine.tree.batchsize = 1000
+		nodes[i] = node
+
+		mux := servers[i].Config.Handler.(*http.ServeMux)
+		mux.HandleFunc("/request-vote", requestVoteHandler(node))
+		mux.HandleFunc("/append-entry", appendEntriesHandler(node))
+		mux.HandleFunc("/put", putHandler(node))
+		mux.HandleFunc("/get", getHandler(node))
+	}
+
+	leaderIdx := 0
+	leaderNode := nodes[leaderIdx]
+	leaderNode.mu.Lock()
+	leaderNode.role = Leader
+	leaderNode.currentTerm = 1
+	leaderNode.id = addresses[leaderIdx]
+	leaderNode.nextIndex = make(map[string]int)
+	leaderNode.matchIndex = make(map[string]int)
+	for _, peer := range leaderNode.peers {
+		leaderNode.nextIndex[peer] = 1
+		leaderNode.matchIndex[peer] = 0
+	}
+	leaderNode.mu.Unlock()
+
+	for i, node := range nodes {
+		if i != leaderIdx {
+			node.mu.Lock()
+			node.currentTerm = 1
+			node.role = Follower
+			node.leaderId = addresses[leaderIdx]
+			node.mu.Unlock()
+		}
+	}
+
+	go runHeartbeats(leaderNode, AppendEntriesArgs{})
+	time.Sleep(100 * time.Millisecond)
+
+	const N = 20000
+	const maxConcurrent = 20
+
+	putLatencies := make([]time.Duration, N)
+	putStart := time.Now()
+	putErrs := 0
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrent)
+
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			key := fmt.Sprintf("key_%d", idx)
+			val := fmt.Sprintf("val_%d", idx)
+			url := fmt.Sprintf("http://%s/put?key=%s&val=%s", addresses[leaderIdx], key, val)
+			opStart := time.Now()
+			resp, err := client.Post(url, "application/json", nil)
+			putLatencies[idx] = time.Since(opStart)
+			if err != nil {
+				t.Logf("PUT error: %v", err)
+				putErrs++
+				return
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Logf("PUT status: %d", resp.StatusCode)
+				putErrs++
+			}
+		}(i)
+	}
+	wg.Wait()
+	putDur := time.Since(putStart)
+	p50p, p95p, p99p := calcPercentiles(putLatencies)
+	printResult("Raft PUT", N, putDur, p50p, p95p, p99p, putErrs)
+
+	time.Sleep(500 * time.Millisecond)
+
+	leaderNode.mu.Lock()
+	var insertionOrder []string
+	for _, entry := range leaderNode.log {
+		if strings.HasPrefix(entry.Command, "PUT:") {
+			parts := strings.Split(entry.Command, ":")
+			insertionOrder = append(insertionOrder, parts[1])
+		}
+	}
+	leaderNode.mu.Unlock()
+
+	debugDBPath := filepath.Join(tmpDir, "debug_replay.db")
+	debugTree := newTree(debugDBPath, 4096, 128)
+	for _, key := range insertionOrder {
+		debugTree.insert(key, "val_"+key)
+	}
+
+	missing := 0
+	for _, key := range insertionOrder {
+		if _, found := debugTree.search(key); !found {
+			missing++
+			t.Logf("Missing in debug tree: %s", key)
+		}
+	}
+	t.Logf("Debug replay: %d keys, %d missing", len(insertionOrder), missing)
+	if missing > 0 {
+		t.Fatalf("B+ tree corrupted for this insertion order: %d keys lost", missing)
+	}
+
+	t.Log("Waiting for state machine to apply all entries...")
+
+	var currentLeader *RaftNode
+	for {
+		for _, node := range nodes {
+			node.mu.Lock()
+			if node.role == Leader {
+				currentLeader = node
+				node.mu.Unlock()
+				break
+			}
+			node.mu.Unlock()
+		}
+		if currentLeader != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Logf("Current leader: %s", currentLeader.id)
+
+	for {
+		currentLeader.mu.Lock()
+		applied := currentLeader.lastApplied
+		commitIdx := currentLeader.commitIndex
+		currentLeader.mu.Unlock()
+		if applied >= commitIdx {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Log("All entries applied on current leader.")
+
+	getLatencies := make([]time.Duration, N)
+	getStart := time.Now()
+	getErrs := 0
+	for i := 0; i < N; i++ {
+		key := fmt.Sprintf("key_%d", i)
+		url := fmt.Sprintf("http://%s/get?key=%s", currentLeader.id, key)
+
+		opStart := time.Now()
+		var resp *http.Response
+		var err error
+		for attempt := 0; attempt < 3; attempt++ {
+			resp, err = client.Get(url)
+			if err == nil {
+				break
+			}
+			if attempt < 2 {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		getLatencies[i] = time.Since(opStart)
+		if err != nil {
+			t.Logf("GET error: %v", err)
+			getErrs++
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Logf("GET status: %d", resp.StatusCode)

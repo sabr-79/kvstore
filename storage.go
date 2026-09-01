@@ -47,9 +47,10 @@ func applyLoop(node *RaftNode) {
 	for range ticker.C {
 		node.mu.Lock()
 		for node.commitIndex > node.lastApplied {
-			node.lastApplied++
-			entry := node.log[node.lastApplied-1]
+			entry := node.log[node.lastApplied]
 			commands := strings.Split(entry.Command, ":")
+			node.mu.Unlock()
+
 			switch commands[0] {
 			case "PUT":
 				put(node.stateMachine, commands[1], commands[2])
@@ -57,10 +58,9 @@ func applyLoop(node *RaftNode) {
 				remove(node.stateMachine, commands[1])
 			}
 
+			node.mu.Lock()
+			node.lastApplied++
 		}
-
 		node.mu.Unlock()
-
 	}
-
 }

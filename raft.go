@@ -53,7 +53,7 @@ func newRaftNode(id string, peers []string) *RaftNode {
 
 func electionTimer(node *RaftNode) {
 	for {
-		randomDuration := time.Duration(150+rand.Intn(150)) * time.Millisecond
+		randomDuration := time.Duration(500+rand.Intn(500)) * time.Millisecond
 		select {
 		case <-time.After(randomDuration):
 			node.mu.Lock()
@@ -83,10 +83,11 @@ func runHeartbeats(node *RaftNode, _ AppendEntriesArgs) {
 	}
 
 	node.mu.Unlock()
-	ticker := time.NewTicker(10 * time.Millisecond)
+	// in the future, make this adaptive.
+	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 	for range ticker.C {
-		//persistLog(node)
+		persistLog(node)
 		node.mu.Lock()
 		if node.isDead {
 			node.mu.Unlock()
@@ -136,7 +137,8 @@ func runHeartbeats(node *RaftNode, _ AppendEntriesArgs) {
 							}
 
 						}
-						if count >= (len(node.peers)+1)/2 {
+
+						if count >= (len(node.peers)+1)/2+1 {
 							if node.log[i-1].Term == node.currentTerm {
 								node.commitIndex = i
 							}
@@ -299,18 +301,20 @@ func appendEntries(node *RaftNode, arg AppendEntriesArgs) ReplyEntriesArgs {
 			if matchEntry < len(node.log) {
 				if entry.Term != node.log[matchEntry].Term || node.log[matchEntry].Command != entry.Command {
 					node.log = node.log[:matchEntry]
-					if len(node.pendingLog) >= node.batchsize {
-						node.mu.Unlock()
-						persistLog(node)
-						node.mu.Lock()
-					}
+					node.pendingLog = nil
+					persist(node)
 				}
 
 			}
 
 			if len(node.log) == matchEntry {
 				node.log = append(node.log, entry)
-				persist(node)
+				node.pendingLog = append(node.pendingLog, entry)
+				if len(node.pendingLog) >= node.batchsize {
+					node.mu.Unlock()
+					persistLog(node)
+					node.mu.Lock()
+				}
 			}
 
 		}

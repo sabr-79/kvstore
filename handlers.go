@@ -80,17 +80,17 @@ func getHandler(node *RaftNode) http.HandlerFunc {
 			node.mu.Unlock()
 			return
 		}
+		node.mu.Unlock()
+
 		val, valid := get(node.stateMachine, key)
 
 		if !valid {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]string{"error": "no such key exists"})
-			node.mu.Unlock()
 			return
 		}
 
-		node.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"message": "Got key", "key": key, "value": val})
@@ -223,8 +223,9 @@ func scanHandler(node *RaftNode) http.HandlerFunc {
 			http.Error(w, "invalid param", http.StatusBadRequest)
 			return
 		}
-		resKey, resVal := scan(node.stateMachine, skey, ekey)
 		node.mu.Unlock()
+
+		resKey, resVal := scan(node.stateMachine, skey, ekey)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
