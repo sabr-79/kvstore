@@ -96,12 +96,11 @@ func TestFullBenchmark(t *testing.T) {
 				return sortedDataset[i][0] < sortedDataset[j][0]
 			})
 
-			// After generating the dataset, but before running any system:
 			totalPayload := int64(0)
 			for _, kv := range dataset {
 				totalPayload += int64(len(kv[0]) + len(kv[1]))
 			}
-			cacheBytes := cacheBudgetBytes(totalPayload) // uses your existing minCacheBytes and fraction
+			cacheBytes := cacheBudgetBytes(totalPayload)
 
 			runBPlusTreeFull(t, n, dataset, sortedDataset, cacheBytes)
 			runSQLiteFull(t, n, dataset, sortedDataset, cacheBytes)

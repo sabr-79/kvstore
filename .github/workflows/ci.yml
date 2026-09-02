@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]        
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.6'    
+          cache: true          
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run short tests
+        run: go test ./... -short -count=1
+
+      - name: Run full test suite 
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: go test ./... -count=1
+
+  benchmark:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'   # manual only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.6'
+      - run: go test -bench=. -run=^$ -benchmem

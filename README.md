@@ -44,7 +44,7 @@ kv/
 ├── handlers.go        # Inbound network helpers
 ├── main_test.go       # Testing for current phase (raft, btree validation)
 ├── main.go            # Web server entrypoint
-├── persistence.go     # Reading/writing from disk
+├── persistence.go     # Reading/writing from disk for both Raft logs and tree data
 ├── raft.go            # RaftNode struct, state changes, election, and heartbeats
 ├── rpc.go             # Outbound network helpers 
 └── storage.go         # KVstore struct, core operations + log application loop
