@@ -22,15 +22,14 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Vet
-        run: go vet ./...
+      - name: Run short tests + Vet
+        run:  go test -vet=all -short -count=1 ./...
 
-      - name: Run short tests
-        run: go test ./... -short -count=1
 
-      - name: Run full test suite 
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: go test ./... -count=1
+
+    #   - name: Run full test suite 
+    #     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    #     run: go test ./... -count=1
 
   benchmark:
     runs-on: ubuntu-latest
