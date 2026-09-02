@@ -1,10 +1,7 @@
 package main
 
 import (
-	"runtime"
 	"slices"
-
-	"golang.org/x/sys/unix"
 )
 
 // look into optimizing order num for m2/macOS page sizes
@@ -35,14 +32,6 @@ import (
 // key length (2b) | key bytes
 
 // why doesn't fsync work on macOS???
-
-func (p *Pager) syncFile() error {
-	if runtime.GOOS == "darwin" {
-		_, err := unix.FcntlInt(p.file.Fd(), unix.F_FULLFSYNC, 0)
-		return err
-	}
-	return p.file.Sync()
-}
 
 type TreeNode struct {
 	isLeaf   bool
