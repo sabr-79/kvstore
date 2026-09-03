@@ -40,13 +40,26 @@ type RaftNode struct {
 	isDead          bool
 	pendingLog      []LogEntry
 	batchsize       int
+	snapIndex       int
+	snapTerm        int
+	snapsize        int
 }
 
 func newRaftNode(id string, peers []string) *RaftNode {
-	newNode := RaftNode{role: Follower, currentTerm: 0, votedFor: "", id: id, peers: peers, electionResetCh: make(chan struct{}, 1), batchsize: 100}
-	readPersistFile(&newNode)
+	newNode := RaftNode{role: Follower, currentTerm: 0, votedFor: "", id: id, peers: peers, electionResetCh: make(chan struct{}, 1), batchsize: 100, snapsize: 100}
+	if snap, err := loadSnapshot(id); err == nil && snap != nil {
+		newNode.stateMachine = &KVstore{tree: restoreTree(snap.TreeData)}
+		newNode.snapIndex = snap.LastIndex
+		newNode.snapTerm = snap.LastTerm
+		readPersistFile(&newNode)
+	} else {
+		readPersistFile(&newNode)
+	}
 	go electionTimer(&newNode)
 	go applyLoop(&newNode)
+	if newNode.snapsize > 0 {
+		go snapshotManager(&newNode, newNode.snapsize)
+	}
 	return &newNode
 
 }
@@ -104,16 +117,69 @@ func runHeartbeats(node *RaftNode, _ AppendEntriesArgs) {
 		for _, peer := range node.peers {
 			node.mu.Lock()
 			nxt := node.nextIndex[peer]
+			snapIdx := node.snapIndex
 			prevIdx := nxt - 1
+			if prevIdx < snapIdx {
+				prevIdx = snapIdx
+			}
 			var prevTerm int
 			if prevIdx == 0 {
 				prevTerm = 0
+			} else if prevIdx <= snapIdx {
+				prevTerm = node.snapTerm
 			} else {
-				prevTerm = node.log[prevIdx-1].Term
+				logPos := prevIdx - snapIdx - 1
+				if logPos >= 0 && logPos < len(node.log) {
+					prevTerm = node.log[logPos].Term
+				} else {
+					prevTerm = 0
+				}
 			}
-			entriesToSend := node.log[prevIdx:]
+			var entriesToSend []LogEntry
+			start := prevIdx - snapIdx
+			if start >= 0 && start < len(node.log) {
+				entriesToSend = node.log[start:]
+			} else {
+				entriesToSend = nil
+			}
 			newArg := AppendEntriesArgs{Term: term, LeaderId: id, PrevLogIndex: prevIdx, PrevLogTerm: prevTerm, Entries: entriesToSend, LeaderCommit: node.commitIndex}
 			node.mu.Unlock()
+
+			if snapIdx > 0 && nxt <= snapIdx {
+				go func(p string) {
+					snap, err := loadSnapshot(node.id)
+					if err != nil || snap == nil {
+						return
+					}
+					data, err := snap.encode()
+					if err != nil {
+						return
+					}
+					snapArgs := InstallSnapshotArgs{
+						Term:              term,
+						LeaderId:          id,
+						LastIncludedIndex: snap.LastIndex,
+						LastIncludedTerm:  snap.LastTerm,
+						Data:              data,
+					}
+					reply, err := sendInstallSnapshot(p, snapArgs)
+					if err != nil {
+						return
+					}
+					node.mu.Lock()
+					defer node.mu.Unlock()
+					if reply.Term > node.currentTerm {
+						node.role = Follower
+						node.currentTerm = reply.Term
+						node.votedFor = ""
+					} else if reply.Term == term {
+						node.nextIndex[p] = snap.LastIndex + 1
+						node.matchIndex[p] = snap.LastIndex
+					}
+				}(peer)
+				continue
+			}
+
 			go func(p string, args AppendEntriesArgs) {
 				reply, err := sendAppendedEntry(p, args)
 				if err != nil {
@@ -126,20 +192,29 @@ func runHeartbeats(node *RaftNode, _ AppendEntriesArgs) {
 					node.votedFor = ""
 				}
 				if reply.Success {
-					node.matchIndex[peer] = prevIdx + len(entriesToSend)
-					node.nextIndex[peer] = node.matchIndex[peer] + 1
+					node.matchIndex[p] = args.PrevLogIndex + len(args.Entries)
+					node.nextIndex[p] = node.matchIndex[p] + 1
 
-					for i := node.commitIndex + 1; i <= len(node.log); i++ {
-						var count = 1
-						for _, peer := range node.peers {
-							if node.matchIndex[peer] >= i {
+					for i := node.commitIndex + 1; i <= len(node.log)+node.snapIndex; i++ {
+						var entryTerm int
+						if i <= node.snapIndex {
+							entryTerm = node.snapTerm
+						} else {
+							logPos := i - node.snapIndex - 1
+							if logPos >= 0 && logPos < len(node.log) {
+								entryTerm = node.log[logPos].Term
+							}
+						}
+						count := 1
+						for _, match := range node.matchIndex {
+							if match >= i {
 								count++
 							}
 
 						}
 
 						if count >= (len(node.peers)+1)/2+1 {
-							if node.log[i-1].Term == node.currentTerm {
+							if entryTerm == node.currentTerm {
 								node.commitIndex = i
 							}
 						}
@@ -148,8 +223,8 @@ func runHeartbeats(node *RaftNode, _ AppendEntriesArgs) {
 
 				}
 				if !reply.Success {
-					if node.nextIndex[peer] > 1 {
-						node.nextIndex[peer]--
+					if node.nextIndex[p] > 1 {
+						node.nextIndex[p]--
 
 					}
 
@@ -175,10 +250,17 @@ func becomeCandidate(node *RaftNode) {
 	node.role = Candidate
 	persist(node)
 
-	lastIdx := len(node.log)
+	lastIdx := node.snapIndex + len(node.log)
 	lastTerm := 0
 	if lastIdx > 0 {
-		lastTerm = node.log[lastIdx-1].Term
+		if lastIdx == node.snapIndex {
+			lastTerm = node.snapTerm
+		} else {
+			pos := lastIdx - node.snapIndex - 1
+			if pos >= 0 && pos < len(node.log) {
+				lastTerm = node.log[pos].Term
+			}
+		}
 	}
 	var args = RequestVoteArgs{Term: node.currentTerm, CandidateId: node.id, LastLogIndex: lastIdx, LastLogTerm: lastTerm}
 	var replyCh = make(chan RequestVoteReply, len(node.peers))
@@ -257,7 +339,7 @@ func becomeLeader(node *RaftNode) {
 	node.nextIndex = make(map[string]int)
 	node.matchIndex = make(map[string]int)
 	for _, peer := range node.peers {
-		node.nextIndex[peer] = len(node.log) + 1
+		node.nextIndex[peer] = node.snapIndex + len(node.log) + 1
 		node.matchIndex[peer] = 0
 	}
 	var arg = AppendEntriesArgs{Term: node.currentTerm, LeaderId: node.id}
@@ -277,10 +359,22 @@ func appendEntries(node *RaftNode, arg AppendEntriesArgs) ReplyEntriesArgs {
 		case node.electionResetCh <- struct{}{}:
 		default:
 		}
-		if len(node.log) < arg.PrevLogIndex {
+		if node.snapIndex+len(node.log) < arg.PrevLogIndex {
 			return ReplyEntriesArgs{Term: node.currentTerm, Success: false}
 		}
-		if arg.PrevLogIndex > 0 && node.log[arg.PrevLogIndex-1].Term != arg.PrevLogTerm {
+		if arg.PrevLogIndex > node.snapIndex {
+			pos := arg.PrevLogIndex - node.snapIndex - 1
+			if pos < 0 || pos >= len(node.log) {
+				return ReplyEntriesArgs{Term: node.currentTerm, Success: false}
+			}
+			if node.log[pos].Term != arg.PrevLogTerm {
+				return ReplyEntriesArgs{Term: node.currentTerm, Success: false}
+			}
+		} else if arg.PrevLogIndex == node.snapIndex {
+			if node.snapTerm != arg.PrevLogTerm {
+				return ReplyEntriesArgs{Term: node.currentTerm, Success: false}
+			}
+		} else {
 			return ReplyEntriesArgs{Term: node.currentTerm, Success: false}
 		}
 
@@ -296,18 +390,18 @@ func appendEntries(node *RaftNode, arg AppendEntriesArgs) ReplyEntriesArgs {
 			node.leaderId = arg.LeaderId
 		}
 		for _, entry := range arg.Entries {
-			matchEntry := entry.Index - 1
-
-			if matchEntry < len(node.log) {
-				if entry.Term != node.log[matchEntry].Term || node.log[matchEntry].Command != entry.Command {
-					node.log = node.log[:matchEntry]
+			pos := entry.Index - node.snapIndex - 1
+			if pos < 0 {
+				continue
+			}
+			if pos < len(node.log) {
+				if entry.Term != node.log[pos].Term || node.log[pos].Command != entry.Command {
+					node.log = node.log[:pos]
 					node.pendingLog = nil
 					persist(node)
 				}
-
 			}
-
-			if len(node.log) == matchEntry {
+			if len(node.log) == pos {
 				node.log = append(node.log, entry)
 				node.pendingLog = append(node.pendingLog, entry)
 				if len(node.pendingLog) >= node.batchsize {
@@ -315,11 +409,12 @@ func appendEntries(node *RaftNode, arg AppendEntriesArgs) ReplyEntriesArgs {
 					persistLog(node)
 					node.mu.Lock()
 				}
+
 			}
 
 		}
 		if arg.LeaderCommit > node.commitIndex {
-			node.commitIndex = min(arg.LeaderCommit, len(node.log))
+			node.commitIndex = min(arg.LeaderCommit, node.snapIndex+len(node.log))
 		}
 
 	}

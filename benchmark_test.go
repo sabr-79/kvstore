@@ -83,6 +83,9 @@ func getRangeKeys(sortedDataset [][2]string, n, scanRange int, rng *rand.Rand) (
 }
 
 func TestFullBenchmark(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long benchmark in short mode")
+	}
 	datasetSizes := []int{100, 1000, 10000, 100000, 1000000}
 
 	for _, n := range datasetSizes {

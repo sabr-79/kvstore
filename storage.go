@@ -47,7 +47,8 @@ func applyLoop(node *RaftNode) {
 	for range ticker.C {
 		node.mu.Lock()
 		for node.commitIndex > node.lastApplied {
-			entry := node.log[node.lastApplied]
+			pos := node.lastApplied - node.snapIndex
+			entry := node.log[pos]
 			commands := strings.Split(entry.Command, ":")
 			node.mu.Unlock()
 

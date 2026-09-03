@@ -964,6 +964,7 @@ func TestRaftThroughput2(t *testing.T) {
 		dbPath := filepath.Join(tmpDir, fmt.Sprintf("node_%d.db", i))
 		node := newRaftNode(addresses[i], peers)
 		node.batchsize = 1000
+		node.snapsize = 0
 		node.stateMachine = &KVstore{tree: newTree(dbPath, 4096, 128)}
 		node.stateMachine.tree.batchsize = 1000
 		nodes[i] = node
@@ -1138,4 +1139,143 @@ func TestRaftThroughput2(t *testing.T) {
 	getDur := time.Since(getStart)
 	p50g, p95g, p99g := calcPercentiles(getLatencies)
 	printResult("Raft GET", N, getDur, p50g, p95g, p99g, getErrs)
+}
+
+func TestRaftSnapshotCatchUp(t *testing.T) {
+	tmpDir := t.TempDir()
+	clusterSize := 3
+	servers := make([]*httptest.Server, clusterSize)
+	nodes := make([]*RaftNode, clusterSize)
+	addresses := make([]string, clusterSize)
+
+	// Start HTTP servers
+	for i := 0; i < clusterSize; i++ {
+		mux := http.NewServeMux()
+		server := httptest.NewServer(mux)
+		servers[i] = server
+		parsedURL, _ := url.Parse(server.URL)
+		addresses[i] = parsedURL.Host
+	}
+	defer func() {
+		for _, s := range servers {
+			s.Close()
+		}
+	}()
+
+	for i := 0; i < clusterSize; i++ {
+		id := addresses[i]
+		var peers []string
+		for j := 0; j < clusterSize; j++ {
+			if i != j {
+				peers = append(peers, addresses[j])
+			}
+		}
+
+		dbPath := filepath.Join(tmpDir, fmt.Sprintf("node_%d.db", i))
+		node := newRaftNode(id, peers)
+		node.stateMachine = &KVstore{tree: newTree(dbPath, 4096, 128)}
+		nodes[i] = node
+
+		mux := servers[i].Config.Handler.(*http.ServeMux)
+		mux.HandleFunc("/request-vote", requestVoteHandler(node))
+		mux.HandleFunc("/append-entry", appendEntriesHandler(node))
+		mux.HandleFunc("/install-snapshot", installSnapshotHandler(node))
+		mux.HandleFunc("/put", putHandler(node))
+		mux.HandleFunc("/get", getHandler(node))
+	}
+
+	leader := nodes[0]
+	leader.mu.Lock()
+	leader.role = Leader
+	leader.currentTerm = 1
+	leader.nextIndex = make(map[string]int)
+	leader.matchIndex = make(map[string]int)
+	for _, peer := range leader.peers {
+		leader.nextIndex[peer] = 1
+		leader.matchIndex[peer] = 0
+	}
+	leader.mu.Unlock()
+
+	for i := 1; i < clusterSize; i++ {
+		nodes[i].mu.Lock()
+		nodes[i].currentTerm = 1
+		nodes[i].role = Follower
+		nodes[i].leaderId = addresses[0]
+		nodes[i].mu.Unlock()
+	}
+
+	go runHeartbeats(leader, AppendEntriesArgs{})
+	time.Sleep(100 * time.Millisecond)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	putKey := func(key, val string) {
+		url := fmt.Sprintf("http://%s/put?key=%s&val=%s", addresses[0], key, val)
+		resp, err := client.Post(url, "application/json", nil)
+		if err != nil {
+			t.Fatalf("PUT %s failed: %v", key, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("PUT %s status %d", key, resp.StatusCode)
+		}
+	}
+
+	for i := 0; i < 200; i++ {
+		putKey(fmt.Sprintf("key_%d", i), fmt.Sprintf("val_%d", i))
+	}
+	if err := leader.takeSnapshot(); err != nil {
+		t.Fatalf("takeSnapshot: %v", err)
+	}
+
+	leader.mu.Lock()
+	snapIdx := leader.snapIndex
+	leader.mu.Unlock()
+	if snapIdx == 0 {
+		t.Fatalf("Expected snapshot index > 0, got %d", snapIdx)
+	}
+	t.Logf("Leader snapshot index: %d", snapIdx)
+
+	target := nodes[2]
+	target.mu.Lock()
+	target.isDead = true
+	target.mu.Unlock()
+
+	for i := 200; i < 700; i++ {
+		putKey(fmt.Sprintf("key_%d", i), fmt.Sprintf("val_%d", i))
+	}
+
+	leader.mu.Lock()
+	leader.nextIndex[target.id] = 1
+	leader.mu.Unlock()
+
+	target.mu.Lock()
+	target.isDead = false
+	target.mu.Unlock()
+
+	leader.mu.Lock()
+	leaderCommit := leader.commitIndex
+	leader.mu.Unlock()
+	t.Logf("Leader commit index: %d", leaderCommit)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		target.mu.Lock()
+		applied := target.lastApplied
+		commit := target.commitIndex
+		target.mu.Unlock()
+		if applied >= leaderCommit && commit >= leaderCommit {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	target.mu.Lock()
+	tree := target.stateMachine.tree
+	target.mu.Unlock()
+	for i := 0; i < 700; i++ {
+		key := fmt.Sprintf("key_%d", i)
+		if _, found := tree.search(key); !found {
+			t.Errorf("Follower missing key %s", key)
+		}
+	}
 }

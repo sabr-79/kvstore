@@ -32,6 +32,18 @@ type ReplyEntriesArgs struct {
 	Success bool
 }
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          string
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
 func sendVoteRequest(peerAddr string, args RequestVoteArgs) (RequestVoteReply, error) {
 	body, err := json.Marshal(args)
 	if err != nil {
@@ -73,4 +85,16 @@ func sendAppendedEntry(peerAddr string, arg AppendEntriesArgs) (ReplyEntriesArgs
 
 	}
 	return reply, nil
+}
+
+func sendInstallSnapshot(peerAddr string, args InstallSnapshotArgs) (InstallSnapshotReply, error) {
+	body, _ := json.Marshal(args)
+	resp, err := http.Post("http://"+peerAddr+"/install-snapshot", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return InstallSnapshotReply{}, err
+	}
+	defer resp.Body.Close()
+	var reply InstallSnapshotReply
+	err = json.NewDecoder(resp.Body).Decode(&reply)
+	return reply, err
 }

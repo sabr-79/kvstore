@@ -123,9 +123,9 @@ func putHandler(node *RaftNode) http.HandlerFunc {
 			node.mu.Unlock()
 			return
 		}
-		targetIdx := len(node.log) + 1
+		targetIdx := node.snapIndex + len(node.log) + 1
 
-		var logEntry = LogEntry{Index: len(node.log) + 1, Term: node.currentTerm, Command: "PUT:" + key + ":" + val}
+		var logEntry = LogEntry{Index: targetIdx, Term: node.currentTerm, Command: "PUT:" + key + ":" + val}
 		node.log = append(node.log, logEntry)
 		node.pendingLog = append(node.pendingLog, logEntry)
 		if len(node.pendingLog) >= node.batchsize {
@@ -174,9 +174,9 @@ func removeHandler(node *RaftNode) http.HandlerFunc {
 			return
 		}
 
-		targetIdx := len(node.log) + 1
+		targetIdx := node.snapIndex + len(node.log) + 1
 
-		var logEntry = LogEntry{Index: len(node.log) + 1, Term: node.currentTerm, Command: "REMOVE:" + key}
+		var logEntry = LogEntry{Index: targetIdx, Term: node.currentTerm, Command: "REMOVE:" + key}
 		node.log = append(node.log, logEntry)
 		node.pendingLog = append(node.pendingLog, logEntry)
 		if len(node.pendingLog) >= node.batchsize {
@@ -245,4 +245,18 @@ func scanHandler(node *RaftNode) http.HandlerFunc {
 
 	}
 
+}
+
+func installSnapshotHandler(node *RaftNode) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var args InstallSnapshotArgs
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		reply := installSnapshot(node, args)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(reply)
+	}
 }
