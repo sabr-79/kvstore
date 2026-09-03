@@ -124,7 +124,6 @@ func putHandler(node *RaftNode) http.HandlerFunc {
 			return
 		}
 		targetIdx := node.snapIndex + len(node.log) + 1
-
 		var logEntry = LogEntry{Index: targetIdx, Term: node.currentTerm, Command: "PUT:" + key + ":" + val}
 		node.log = append(node.log, logEntry)
 		node.pendingLog = append(node.pendingLog, logEntry)
@@ -175,7 +174,6 @@ func removeHandler(node *RaftNode) http.HandlerFunc {
 		}
 
 		targetIdx := node.snapIndex + len(node.log) + 1
-
 		var logEntry = LogEntry{Index: targetIdx, Term: node.currentTerm, Command: "REMOVE:" + key}
 		node.log = append(node.log, logEntry)
 		node.pendingLog = append(node.pendingLog, logEntry)

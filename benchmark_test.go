@@ -112,7 +112,6 @@ func TestFullBenchmark(t *testing.T) {
 	}
 }
 
-// B+TREE
 func runBPlusTreeFull(t *testing.T, n int, dataset, sortedDataset [][2]string, cacheBytes int64) {
 	dbPath := filepath.Join(t.TempDir(), "btree.db")
 	tree := newTree(dbPath, pageSize, order)
@@ -205,7 +204,6 @@ func runBPlusTreeFull(t *testing.T, n int, dataset, sortedDataset [][2]string, c
 	fmt.Printf("  (write QPS: %.0f)\n", qpsWrite)
 }
 
-// SQLITE
 func runSQLiteFull(t *testing.T, n int, dataset, sortedDataset [][2]string, cacheBytes int64) {
 	dbPath := filepath.Join(t.TempDir(), "sqlite.db")
 
@@ -342,7 +340,6 @@ func runSQLiteFull(t *testing.T, n int, dataset, sortedDataset [][2]string, cach
 	fmt.Printf("  (write QPS: %.0f)\n", qpsWrite)
 }
 
-// PEBBLE
 func runPebbleFull(t *testing.T, n int, dataset, sortedDataset [][2]string, cacheBytes int64) {
 	dbPath := filepath.Join(t.TempDir(), "pebble")
 	optsWrite := &pebble.Options{

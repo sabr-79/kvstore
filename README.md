@@ -7,16 +7,16 @@ Currently, it's a distributive KV store using a B+ tree as a storage engine and 
  
  
 ### What's done 
-- In-memory store (`map[string]string`) behind `sync.RWMutex`
 - HTTP+JSON API: `GET /get`, `PUT/POST /put`, `DELETE /remove`, `GET /scan`
 - `Get`/`Put`/`Remove`/`Scan` all implemented
 - Concurrency-tested under `go test -race`, including a stress test hammering a single contested key from 100 goroutines to verify no torn/corrupted writes
 - Implemented raft-style elections and tested it in `main_test.go`
 - Implemented log replication, persistence
 - Built the storage engine, replaced and benchmarked it against SQLite and PebbleDB
+- Implemented snapshotting for log compaction
 
 ### Up next 
--  Implement snapshotting
+- Live state visualizer showcasing the current system
 
 
 
@@ -30,7 +30,7 @@ Currently, it's a distributive KV store using a B+ tree as a storage engine and 
 | 3    | Raft: log replication | Done        |
 | 4    | Raft log persistence  | Done        |
 | 5    | B+ tree storage engine| Done        |
-| 6    | Snapshotting          | Not started |
+| 6    | Snapshotting          | Done        |
 | 7    | Live state visualizer | Not started |
 | 8    | Chaos testing         | Not started |
 | 9    | Benchmarking          | In progress |
@@ -42,11 +42,12 @@ kv/
 ├── benchmark.txt      # Detailed benchmark results
 ├── btree.go           # Storage engine
 ├── handlers.go        # Inbound network helpers
-├── main_test.go       # Testing for current phase (raft, btree validation)
+├── main_test.go       # Testing for current phase (raft, btree validation, etc)
 ├── main.go            # Web server entrypoint
 ├── persistence.go     # Reading/writing from disk for both Raft logs and tree data
 ├── raft.go            # RaftNode struct, state changes, election, and heartbeats
 ├── rpc.go             # Outbound network helpers 
+├── snapshot.go        # Stop the world snapshot functions
 └── storage.go         # KVstore struct, core operations + log application loop
 ```
 
@@ -54,7 +55,7 @@ kv/
 - Tested the storage engine against SQLite (uses B/B+ trees) and PebbleDB (LSM, also written in Go). 
 - Lost on writes against both databases, but B+ Trees are more optimized for reads rather than writes
 - Won sequential and warm reads by a large margin due to slotted page layout and cache locality
-- However PebbleDB and SQLite beat the B+ Tree at range scans and cold reads at 1M keys
+- However PebbleDB and SQLite beat the B+ Tree at cold reads at 1M keys
 
 ## Benchmark Comparison (1M keys, equal memory budget)
 
